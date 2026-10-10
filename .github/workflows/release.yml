@@ -11,15 +11,15 @@ permissions:
 jobs:
   build:
     # Apple Silicon runner: arm64 is native, x86_64 is cross-compiled from the
-    # same macOS SDK, so one job can produce both packages.
-    runs-on: macos-15
+    # same macOS SDK, so one job produces both packages.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        run: |
-          rustup update stable --no-self-update
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Build both architectures
         run: ./scripts/package_release.sh

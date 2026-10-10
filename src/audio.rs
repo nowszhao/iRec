@@ -16,9 +16,42 @@ pub const CHANNELS: usize = 2;
 
 /// 麦克风增益。Mac 内建麦克风实测峰值只有 -54 dB 左右，直接混入几乎听不见，
 /// 这里统一放大约 +10 dB（可按需调整）。
-pub const MIC_GAIN: f32 = 3.2;
+pub const MIC_GAIN: f32 = 1.8;
 
-static LOG_FORMAT: std::sync::Once = std::sync::Once::new();
+/// 分别记录麦克风 / 系统声音的输入格式（各一次）。
+static LOG_MIC_FORMAT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LOG_SYS_FORMAT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn log_format(buffer: &CMSampleBuffer, label: &str) {
+    let flag = if label == "mic" { &LOG_MIC_FORMAT } else { &LOG_SYS_FORMAT };
+    if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let Some(desc) = (unsafe { buffer.format_description() }) else { return };
+    let asbd = unsafe { CMAudioFormatDescriptionGetStreamBasicDescription(&desc) };
+    if asbd.is_null() {
+        return;
+    }
+    let a = unsafe { &*asbd };
+    crate::state::log(&format!(
+        "{} format: rate={} ch={} bits={} {}",
+        label,
+        a.mSampleRate,
+        a.mChannelsPerFrame,
+        a.mBitsPerChannel,
+        if (a.mFormatFlags & FLAG_FLOAT) != 0 { "float" } else { "int" }
+    ));
+}
+
+/// 软限幅：轻声几乎原样通过，接近满刻度时平滑压缩，避免硬削波的毛刺感。
+fn soft_limit(v: f32) -> f32 {
+    if v.abs() < 0.7 {
+        v
+    } else {
+        let sign = if v < 0.0 { -1.0 } else { 1.0 };
+        sign * (0.7 + 0.3 * (1.0 - (-(v.abs() - 0.7) / 0.3).exp()))
+    }
+}
 
 const FORMAT_LINEAR_PCM: u32 = 0x6C70_636D; // 'lpcm'
 const FLAG_FLOAT: u32 = 1 << 0;
@@ -42,13 +75,6 @@ fn format_of(buffer: &CMSampleBuffer) -> Option<Format> {
         return None;
     }
     let a = unsafe { &*asbd };
-    LOG_FORMAT.call_once(|| {
-        crate::state::log(&format!(
-            "audio format: rate={} ch={} bits={} {}",
-            a.mSampleRate, a.mChannelsPerFrame, a.mBitsPerChannel,
-            if (a.mFormatFlags & FLAG_FLOAT) != 0 { "float" } else { "int" }
-        ))
-    });
     if a.mFormatID != FORMAT_LINEAR_PCM || (a.mFormatFlags & FLAG_PACKED) == 0 {
         return None;
     }
@@ -261,7 +287,7 @@ pub fn mix_into(buffer: &CMSampleBuffer, mic: &mut Vec<f32>, replace: bool) -> b
             } * MIC_GAIN;
             let index = if raw.interleaved { i * fmt.channels + c } else { i };
             let current = if replace { 0.0 } else { read_sample(&fmt, ptr, index) };
-            let mixed = (current + mic_sample).clamp(-1.0, 1.0);
+            let mixed = soft_limit(current + mic_sample);
             write_sample(&fmt, ptr, index, mixed);
         }
     }

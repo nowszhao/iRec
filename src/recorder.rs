@@ -345,6 +345,12 @@ impl Recorder {
         }
 
         let state = self.shared.lock().map_err(|e| e.to_string())?;
+        if state.settings.audio.wants_mic() {
+            log(&format!(
+                "mic: peak={:.5} gain=x{} underrun_buffers={}",
+                state.mic_peak, audio::MIC_GAIN, state.mic_underruns
+            ));
+        }
 
         if let Some(audio_in) = &state.audio_in {
             unsafe { audio_in.markAsFinished() };
@@ -390,16 +396,6 @@ impl Recorder {
             return Err(format!("视频未正常完成：{detail}"));
         }
 
-        if let Some(shared) = CURRENT.lock().ok().and_then(|g| g.clone()) {
-            if let Ok(state) = shared.lock() {
-                if state.settings.audio.wants_mic() {
-                    log(&format!(
-                        "mic: peak={:.5} (gain x{}) underrun_buffers={}",
-                        state.mic_peak, audio::MIC_GAIN, state.mic_underruns
-                    ));
-                }
-            }
-        }
         let bytes = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         Ok((self.path.clone(), bytes, frames))
     }
@@ -517,6 +513,7 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
         }
     } else if r#type.0 == SCStreamOutputType::Microphone.0 {
         // 麦克风：先排队，等系统声音的采样到达时一起混音。
+        audio::log_format(buffer, "mic");
         if let Some((pcm, peak)) = audio::extract_canonical(buffer) {
             state.mic_started_at = Some(std::time::Instant::now());
             state.mic_peak = state.mic_peak.max(peak);
@@ -528,6 +525,9 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
             log("mic sample skipped: unsupported buffer format");
         }
     } else if state.session_started {
+        if r#type.0 == SCStreamOutputType::Audio.0 {
+            audio::log_format(buffer, "system");
+        }
         if state.settings.audio.wants_mic() && state.mic_started_at.is_none() {
             // 麦克风迟迟没送来采样：多半是权限没给或输入设备没有信号。
             state.mic_wait_buffers += 1;

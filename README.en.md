@@ -15,6 +15,7 @@ the desktop by default.
   - [Control window](#control-window)
   - [Global hotkeys](#global-hotkeys)
   - [Region recording](#region-recording)
+  - [The line](#the-line)
   - [Menu bar & settings](#menu-bar--settings)
 - [Output & measured size](#output--measured-size)
 - [Permissions & troubleshooting](#permissions--troubleshooting)
@@ -33,11 +34,12 @@ the desktop by default.
 | Persistent selection frame | The frame stays on screen after selection, can be dragged and resized, and hosts its own start/stop control bar |
 | Quiet menu-bar app | On launch it only appears in the menu bar (no Dock icon, no window); every action lives in the status item menu |
 | State-aware controls | Stop is greyed out while idle; start/region are greyed out while recording |
-| Never recorded | The control window and the selection frame use `NSWindowSharingType::None`, so they never appear in the capture |
+| Never recorded | The control window, the selection frame and the line's windows use `NSWindowSharingType::None`, so they never appear in the capture |
 | Audio | Four modes: off / system audio / microphone / system + microphone (one track each) |
 | Save location | `~/Desktop` by default, change it with "Choose save location…" in the menu; persisted across restarts |
 | Encoding | HEVC hardware encoding, YUV420 sampling, adjustable quality / frame rate / resolution |
 | Output | MP4 (HEVC + AAC) named `iRec-YYYYMMDD-HHMMSS.mp4`, saved to `~/Desktop` |
+| The line | Finished recordings hang from a clothesline under the menu bar: rest the pointer there to drop it, click a card to reveal it in Finder, drag it into an app or a folder, click the cross to take it off |
 
 ## Requirements
 
@@ -181,11 +183,49 @@ Moving or resizing during a recording does **not** change the captured area of t
 recording (this avoids jumps in the video). The new region applies to the **next**
 recording, and the control bar shows a hint for that.
 
+### The line
+
+A finished recording is more than a line of text in the menu: it hangs from a clothesline
+just below the menu bar, its first frame with a play button, pegged to the rope, flown up
+from the area you just recorded.
+
+The line rests above the top edge. Rest the pointer in the menu bar for 0.25 s and it slides
+down; move away and it tucks itself back after 0.5 s. It also shows its face for 2.5 s right
+after a recording, stays tucked away while one is running, and is never recorded.
+
+| Gesture | Result |
+| :-- | :-- |
+| Click a card | Reveal it in Finder |
+| Double click | Open it in the default player |
+| Drag into another app | It gets a copy, the card stays on the line |
+| Drag into a folder or the Desktop | The file stays there, the card leaves the line |
+| Drag onto the Dock's Trash | The file goes to the Trash, the card leaves the line |
+| Click the cross | Take it off the line (the file stays put) |
+| ⌥ + click the cross | Take it off and move the file to the Trash |
+
+What is dragged out is a real file: the file URL is handed to AppKit's dragging session and the
+destination decides what happens with it. Apps take a copy, Finder moves the file into the folder,
+and the Dock's Trash is followed up by iRec moving the file itself. Whenever the file is gone from
+its path, the next check (every 3 s) quietly takes the card off the line.
+
+At most eight hang at a time; older ones fall off, or take everything down with "Clear the line"
+in the menu. Related items: Show / hide the line, Bring the line down when the pointer rests in
+the menu bar, Hang recordings on the line, Clear the line.
+
+The animation idea comes from [Tendedero](https://github.com/alejandrobujan/tendedero) (MIT):
+a rope that fades out at both ends, the swing that overshoots and settles on a damped spring,
+a breeze that runs along the whole row now and then, the glass frame and peg that grow in while
+a card flies up, and the fall that spins a discarded card away. iRec reimplements that motion
+with hand-drawn AppKit and its own spring integration (`src/line.rs`), hanging recordings
+instead of screenshots.
+
 ### Menu bar & settings
 
 The menu offers, in order: start recording (full screen), select record region, stop recording,
 audio (four-option submenu), quality (Smaller / Balanced / High / Max), frame rate (30 / 60), resolution
-(1x / 2x), reveal latest recording, open control window…, request / check permission, quit.
+(1x / 2x), show / hide the line, bring the line down when the pointer rests in the menu bar, hang
+recordings on the line, clear the line, reveal latest recording, open control window…, request /
+check permission, quit.
 "Stop recording" is enabled only while recording and greyed out otherwise. Menu items and
 window controls share the same settings.
 
@@ -262,6 +302,20 @@ as new, so permission has to be granted once again. Also, macOS only applies a g
 iRec is **fully quit and relaunched** — closing the window is not enough. The same applies to the microphone:
 System Settings → Privacy & Security → Microphone, allow iRec and relaunch.
 
+**Already enabled in Settings, yet recording fails with "the user denied … TCC"**: that is
+macOS applying a grant only to processes started *after* it. When a start fails now, iRec says
+so directly and offers "Relaunch iRec" as the first button (it quits and reopens itself a second
+later); the menu status line turns into "⚠ Screen Recording permission not in effect — click to
+relaunch" and does the same when clicked. Once the system grant lands, the line switches to
+"✓ Permission granted — relaunch iRec for it to take effect".
+
+Two things make it look revoked again:
+
+- Rebuilding: ad-hoc signing (the default) gives every build a new code identity, voiding the
+  previous grant. Sign with `SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build_app.sh`
+  to keep a stable identity and stop re-authorising.
+- Changing the signature or the bundle identifier (`com.nows.irec`).
+
 ## Headless self-test
 
 Verify capture and muxing without the UI:
@@ -287,6 +341,7 @@ Set `SCREEN_REC_DEBUG=1` for capture/encoding diagnostics on stderr.
 | `src/hotkey.rs` | Carbon `RegisterEventHotKey`; no Accessibility or Input Monitoring permission needed |
 | `src/overlay.rs` | Full-screen transparent `NSWindow` with a custom `NSView` for drag selection |
 | `src/hud.rs` | Persistent selection frame: outline window, control bar and resize grip working together |
+| `src/line.rs` | The line: two `NSPanel`s (rope and flight) with hand-drawn cards, springs integrated per frame |
 | `src/audio.rs` | PCM read-out, resampling and mixing (microphone into system audio) |
 | `src/state.rs` | Global settings and command queue (hotkeys, menu, picker all executed on the main-thread timer) |
 
@@ -316,6 +371,9 @@ the recording.
 - System audio (what applications play) is captured; microphone input is not.
 - Hotkeys are fixed to `⇧⌘R` / `⇧⌘E` (see `register_defaults` in `src/hotkey.rs`).
 - Adjusting the selection during a recording does not change the framing of the current video.
+- The line hangs on the screen under the pointer, and the peek after a recording happens there too.
+- The drop destination decides: dropping into a folder sometimes copies instead of moves, in which
+  case the original stays put and so does the card.
 
 ## App icon
 

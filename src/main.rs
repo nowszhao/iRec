@@ -2,6 +2,7 @@ mod audio;
 mod frame;
 mod hotkey;
 mod hud;
+mod line;
 mod mic;
 mod overlay;
 mod recorder;
@@ -20,13 +21,13 @@ use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSBackingStoreType, NSBezierPath, NSButton, NSButtonType, NSColor,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSImage, NSMenu, NSMenuItem,
-    NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSStatusBar, NSStatusItem, NSTextField,
-    NSWarningAlertStyle, NSWindow, NSWindowStyleMask, NSWorkspace,
+    NSAlertSecondButtonReturn, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSStatusBar,
+    NSStatusItem, NSTextField, NSWarningAlertStyle, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint,
-    NSRect, NSSize, NSString, NSURL,
+    ns_string, MainThreadMarker, NSArray, NSBundle, NSNotification, NSObject, NSObjectProtocol,
+    NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 
 use crate::overlay::pick_region;
@@ -54,6 +55,9 @@ struct AppIvars {
     region_button: OnceCell<Retained<NSButton>>,
     stop_button: OnceCell<Retained<NSButton>>,
     stop_menu_item: OnceCell<Retained<NSMenuItem>>,
+    line_toggle_item: OnceCell<Retained<NSMenuItem>>,
+    line_hover_item: OnceCell<Retained<NSMenuItem>>,
+    line_enable_item: OnceCell<Retained<NSMenuItem>>,
 }
 
 define_class!(
@@ -73,6 +77,9 @@ define_class!(
             // macOS re-prompt even when access was already granted. Permission
             // is only requested when a capture actually fails.
             log("started");
+            line::init(self.mtm());
+            let (enabled, hover) = with_state(|s| (s.settings.line, s.settings.line_hover));
+            line::apply_settings(enabled, hover);
         }
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
@@ -235,24 +242,25 @@ define_class!(
             // Asking explicitly shows macOS' own prompt when needed.
             let granted = crate::recorder::request_permission(true)
                 || unsafe { CGPreflightScreenCaptureAccess() };
-            let alert = unsafe { NSAlert::new(self.mtm()) };
-            if granted {
-                alert.setMessageText(&NSString::from_str("屏幕录制权限已开启"));
-                alert.setInformativeText(&NSString::from_str("可以开始录制了。"));
-            } else {
-                alert.setMessageText(&NSString::from_str("屏幕录制权限未开启"));
-                alert.setInformativeText(&NSString::from_str(
-                    "1) 在 系统设置 → 隐私与安全性 → 屏幕录制 里勾选 iRec；\
-                     2) 如果列表里没有 iRec，先按一次 ⇧⌘R 让系统弹出授权框并选“允许”；\
-                     3) 改完退出并重新打开 iRec。",
-                ));
-            }
-            alert.addButtonWithTitle(&NSString::from_str("打开系统设置"));
-            alert.addButtonWithTitle(&NSString::from_str("好"));
-            if alert.runModal() == NSAlertFirstButtonReturn {
-                open_screen_capture_settings();
-            }
             log(&format!("permission check: preflight={granted}"));
+            if granted {
+                with_state(|s| s.permission_blocked = false);
+                let alert = unsafe { NSAlert::new(self.mtm()) };
+                alert.setMessageText(&NSString::from_str("屏幕录制权限已开启"));
+                alert.setInformativeText(&NSString::from_str(
+                    "可以开始录制了。要是刚才录过一次失败的，完全退出再打开 iRec 就好。",
+                ));
+                alert.addButtonWithTitle(&NSString::from_str("好"));
+                alert.runModal();
+            } else {
+                self.show_permission_alert();
+            }
+        }
+
+        /// 状态行上的权限提示可以直接点：重启之后授权才对这个进程生效。
+        #[unsafe(method(relaunch:))]
+        fn relaunch_action(&self, _sender: &AnyObject) {
+            self.relaunch();
         }
 
         #[unsafe(method(qualityChanged:))]
@@ -295,6 +303,36 @@ define_class!(
                 let urls = NSArray::from_retained_slice(&[url]);
                 NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls);
             }
+        }
+
+        #[unsafe(method(toggleLine:))]
+        fn toggle_line(&self, _sender: &AnyObject) {
+            line::toggle_pinned();
+        }
+
+        #[unsafe(method(toggleLineHover:))]
+        fn toggle_line_hover(&self, _sender: &AnyObject) {
+            let hover = with_state(|s| {
+                s.settings.line_hover = !s.settings.line_hover;
+                persist(&s.settings);
+                s.settings.line_hover
+            });
+            line::apply_settings(with_state(|s| s.settings.line), hover);
+        }
+
+        #[unsafe(method(toggleLineEnabled:))]
+        fn toggle_line_enabled(&self, _sender: &AnyObject) {
+            let (enabled, hover) = with_state(|s| {
+                s.settings.line = !s.settings.line;
+                persist(&s.settings);
+                (s.settings.line, s.settings.line_hover)
+            });
+            line::apply_settings(enabled, hover);
+        }
+
+        #[unsafe(method(clearLine:))]
+        fn clear_line(&self, _sender: &AnyObject) {
+            line::clear();
         }
 
         #[unsafe(method(quit:))]
@@ -650,6 +688,36 @@ impl AppDelegate {
         let open_window = menu_item(mtm, "打开控制窗口…", Some(sel!(showWindow:)), self, 0);
         menu.addItem(&open_window);
 
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        let line_toggle = menu_item(mtm, "显示晾衣绳", Some(sel!(toggleLine:)), self, 0);
+        menu.addItem(&line_toggle);
+        self.ivars().line_toggle_item.set(line_toggle).ok();
+
+        let line_hover = menu_item(
+            mtm,
+            "指针停在菜单栏时放下",
+            Some(sel!(toggleLineHover:)),
+            self,
+            0,
+        );
+        menu.addItem(&line_hover);
+        self.ivars().line_hover_item.set(line_hover).ok();
+
+        let line_enable = menu_item(
+            mtm,
+            "录完自动挂到晾衣绳",
+            Some(sel!(toggleLineEnabled:)),
+            self,
+            0,
+        );
+        menu.addItem(&line_enable);
+        self.ivars().line_enable_item.set(line_enable).ok();
+
+        let line_clear = menu_item(mtm, "清空晾衣绳", Some(sel!(clearLine:)), self, 0);
+        menu.addItem(&line_clear);
+
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+
         let permission = menu_item(
             mtm,
             "申请 / 检查屏幕录制权限",
@@ -713,21 +781,68 @@ impl AppDelegate {
         open_screen_capture_settings();
     }
 
-    /// Tells the user how to grant screen recording access and offers to open
-    /// the relevant System Settings pane.
+    /// 屏幕录制权限没生效时的引导。macOS 的授权只对之后启动的进程生效，
+    /// 所以主要动作是「重新启动 iRec」，而不是反复去系统设置。
     fn show_permission_alert(&self) {
+        let granted = unsafe { CGPreflightScreenCaptureAccess() };
         let alert = unsafe { NSAlert::new(self.mtm()) };
         alert.setAlertStyle(NSWarningAlertStyle);
-        alert.setMessageText(&NSString::from_str("需要“屏幕录制”权限"));
-        alert.setInformativeText(&NSString::from_str(
-            "请在 系统设置 → 隐私与安全性 → 屏幕录制 中勾选 iRec，\
-             然后完全退出并重新打开 iRec（macOS 授权后要重启应用才生效）。",
-        ));
+        if granted {
+            alert.setMessageText(&NSString::from_str("权限已开启，重启 iRec 后生效"));
+            alert.setInformativeText(&NSString::from_str(
+                "macOS 的屏幕录制授权只对之后启动的进程生效，所以要完全退出再打开一次 iRec。\n\
+                 要是重开之后还这样：去系统设置把 iRec 的开关关掉再打开一次——\
+                 开关里可能记着上一个签名（重新编译过就很常见）。",
+            ));
+        } else {
+            alert.setMessageText(&NSString::from_str("屏幕录制权限还没生效"));
+            alert.setInformativeText(&NSString::from_str(
+                "1) 在 系统设置 → 隐私与安全性 → 屏幕录制 里，把 iRec 的开关\
+                 关掉再打开一次：只确认它是开着的不够，开关里可能记着上一个签名\
+                 （重新编译过就很常见）；列表里有多条 iRec 就全部打开。\n\
+                 2) 授权之后要完全退出再打开 iRec——授权只对之后启动的进程生效，\
+                 这也是「设置里已经勾了、这边还是录不了」最常见的原因；\
+                 本弹窗第一个按钮就是「重新启动 iRec」。\n\
+                 3) 如果列表里根本没有 iRec，就先按一次 ⇧⌘R，让系统弹出授权框并选“允许”。\n\
+                 4) 反复失效的话：默认打包是 ad-hoc 签名，每次重建都是新的身份，\
+                 旧的授权会作废；用 SIGN_IDENTITY 签名（见 README）可固定身份。",
+            ));
+        }
+        alert.addButtonWithTitle(&NSString::from_str("重新启动 iRec"));
         alert.addButtonWithTitle(&NSString::from_str("打开系统设置"));
         alert.addButtonWithTitle(&NSString::from_str("好"));
-        if alert.runModal() == NSAlertFirstButtonReturn {
+        let choice = alert.runModal();
+        if choice == NSAlertFirstButtonReturn {
+            self.relaunch();
+        } else if choice == NSAlertSecondButtonReturn {
             self.open_settings();
         }
+    }
+
+    /// 退出并重新打开自己：授权改动之后就差这一步。
+    fn relaunch(&self) {
+        log("relaunching");
+        let bundle = NSBundle::mainBundle();
+        let app = bundle.bundlePath().to_string();
+        let exe = bundle.executablePath().map(|p| p.to_string());
+        let command = if app.ends_with(".app") {
+            format!("sleep 1; open -n '{}'", shell_quote(&app))
+        } else if let Some(exe) = exe {
+            format!("sleep 1; '{}' >/dev/null 2>&1 &", shell_quote(&exe))
+        } else {
+            return;
+        };
+        if std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&command)
+            .spawn()
+            .is_err()
+        {
+            log("relaunch: 无法启动重启命令");
+            return;
+        }
+        self.stop_sync_if_recording();
+        NSApplication::sharedApplication(self.mtm()).terminate(None);
     }
 
     fn start(&self, rect: Option<Rect>) {
@@ -736,13 +851,26 @@ impl AppDelegate {
             Ok(recorder) => with_state(|s| {
                 s.recorder = Some(recorder);
                 s.started_at = Some(Instant::now());
+                s.region = rect;
                 s.last_error = None;
+                s.permission_blocked = false;
             }),
             Err(err) => {
                 eprintln!("irec: {err}");
-                with_state(|s| s.last_error = Some(err));
+                // 权限没生效是最常见的失败原因，单独给一条能照着做的提示。
+                let blocked = !unsafe { CGPreflightScreenCaptureAccess() };
+                log(&format!("start failed: {err} (permission blocked={blocked})"));
+                with_state(|s| {
+                    s.last_error = Some(err);
+                    s.permission_blocked = blocked;
+                });
+                if blocked {
+                    self.show_permission_alert();
+                }
             }
         }
+        // 录制时把绳子收起来：挡视线，窗口本身也不会被录进去。
+        line::set_busy(with_state(|s| s.recorder.is_some()));
     }
 
     /// Stops the recording in the background so the main run loop keeps
@@ -750,6 +878,7 @@ impl AppDelegate {
     fn finish(&self) {
         let recorder = with_state(|s| s.recorder.take());
         let Some(recorder) = recorder else { return };
+        let region = with_state(|s| s.region.take());
         with_state(|s| s.stopping = true);
         std::thread::spawn(move || {
             let result = recorder.stop();
@@ -763,9 +892,13 @@ impl AppDelegate {
                             path.display(),
                             bytes as f64 / 1_048_576.0
                         ));
-                        s.last_saved = Some((path, bytes));
+                        s.last_saved = Some((path.clone(), bytes));
                         s.saved_at = Some(Instant::now());
                         s.last_error = None;
+                        // 缩略图和挂上去都在后台，主线程只负责画。
+                        if s.settings.line {
+                            line::hang_later(path, region);
+                        }
                     }
                     Err(err) => {
                         log(&format!("stop failed: {err}"));
@@ -773,6 +906,7 @@ impl AppDelegate {
                     }
                 }
             });
+            line::set_busy(false);
         });
     }
 
@@ -874,9 +1008,39 @@ impl AppDelegate {
             let has_file = with_state(|s| s.last_saved.is_some());
             item.setHidden(!has_file);
         }
+        let (enabled, hover, revealed) = line::status();
+        if let Some(item) = self.ivars().line_toggle_item.get() {
+            item.setTitle(&NSString::from_str(if revealed {
+                "收起晾衣绳"
+            } else {
+                "显示晾衣绳"
+            }));
+            item.setEnabled(enabled);
+        }
+        if let Some(item) = self.ivars().line_hover_item.get() {
+            item.setState(state_value(hover));
+            item.setEnabled(enabled);
+        }
+        if let Some(item) = self.ivars().line_enable_item.get() {
+            item.setState(state_value(enabled));
+        }
         if let Some(item) = self.ivars().status_line.get() {
+            let blocked = with_state(|s| s.permission_blocked);
+            if blocked {
+                let text = if unsafe { CGPreflightScreenCaptureAccess() } {
+                    "✓ 权限已开启，重启 iRec 后生效（点此重启）"
+                } else {
+                    "⚠ 屏幕录制权限未生效，点此重启 iRec"
+                };
+                item.setTitle(&NSString::from_str(text));
+                item.setHidden(false);
+                unsafe { item.setAction(Some(sel!(relaunch:))) };
+                unsafe { item.setTarget(Some(self)) };
+            }
             let text = with_state(|s| {
-                if let Some(err) = &s.last_error {
+                if s.permission_blocked {
+                    None
+                } else if let Some(err) = &s.last_error {
                     Some(format!("⚠ {err}"))
                 } else if let Some((path, bytes)) = &s.last_saved {
                     Some(format!(
@@ -892,8 +1056,14 @@ impl AppDelegate {
                 Some(text) => {
                     item.setTitle(&NSString::from_str(&text));
                     item.setHidden(false);
+                    unsafe { item.setAction(None) };
+                    unsafe { item.setTarget(None) };
                 }
-                None => item.setHidden(true),
+                None => {
+                    if !blocked {
+                        item.setHidden(true);
+                    }
+                }
             }
         }
     }
@@ -1014,6 +1184,11 @@ fn build_main_menu(mtm: MainThreadMarker, target: &AppDelegate) -> Retained<NSMe
     std::mem::forget(app_menu);
     std::mem::forget(app_item);
     main
+}
+
+/// 给 sh 用的单引号转义。
+fn shell_quote(text: &str) -> String {
+    text.replace('\'', "'\\''")
 }
 
 fn open_screen_capture_settings() {

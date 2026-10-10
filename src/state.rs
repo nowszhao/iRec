@@ -114,6 +114,10 @@ pub struct Settings {
     pub quality: Quality,
     pub show_cursor: bool,
     pub out_dir: PathBuf,
+    /// 晾衣绳：录完的视频挂在菜单栏下面。
+    pub line: bool,
+    /// 指针停在菜单栏时把绳子放下来。
+    pub line_hover: bool,
 }
 
 impl Default for Settings {
@@ -125,6 +129,8 @@ impl Default for Settings {
             quality: Quality::Balanced,
             show_cursor: true,
             out_dir: dirs_desktop(),
+            line: true,
+            line_hover: true,
         }
     }
 }
@@ -135,6 +141,8 @@ const KEY_AUDIO: &str = "audioSource";
 const KEY_QUALITY: &str = "quality";
 const KEY_FPS: &str = "fps";
 const KEY_SCALE: &str = "scale";
+const KEY_LINE: &str = "line";
+const KEY_LINE_HOVER: &str = "lineHover";
 
 pub fn load_persisted(settings: &mut Settings) {
     use objc2_foundation::{NSUserDefaults, NSString};
@@ -160,6 +168,16 @@ pub fn load_persisted(settings: &mut Settings) {
     let scale = defaults.doubleForKey(&NSString::from_str(KEY_SCALE));
     if scale == 1.0 || scale == 2.0 {
         settings.scale = scale;
+    }
+    // 没写过的键默认是 false，所以先看看有没有存过。
+    if defaults.objectForKey(&NSString::from_str(KEY_LINE)).is_some() {
+        settings.line = defaults.boolForKey(&NSString::from_str(KEY_LINE));
+    }
+    if defaults
+        .objectForKey(&NSString::from_str(KEY_LINE_HOVER))
+        .is_some()
+    {
+        settings.line_hover = defaults.boolForKey(&NSString::from_str(KEY_LINE_HOVER));
     }
 }
 
@@ -196,9 +214,13 @@ pub struct AppState {
     pub actions: VecDeque<Action>,
     /// Last finished recording: (path, bytes).
     pub last_saved: Option<(PathBuf, u64)>,
+    /// 当前这次录制框的是哪块区域（屏幕坐标，左上角为原点），录完卡片从这里飞上来。
+    pub region: Option<Rect>,
     /// When the last recording finished (used for the transient status title).
     pub saved_at: Option<Instant>,
     pub last_error: Option<String>,
+    /// 上一次开始录制被 macOS 的权限挡住了：提示和状态行都按这个走。
+    pub permission_blocked: bool,
 }
 
 impl Default for AppState {
@@ -210,8 +232,10 @@ impl Default for AppState {
             started_at: None,
             actions: VecDeque::new(),
             last_saved: None,
+            region: None,
             saved_at: None,
             last_error: None,
+            permission_blocked: false,
         }
     }
 }

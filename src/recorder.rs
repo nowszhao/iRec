@@ -92,6 +92,10 @@ pub struct RecorderState {
     mic_peak: f32,
     /// 混音时麦克风队列不够用（欠载）的次数，停止时写日志。
     mic_underruns: u32,
+    /// 实测麦克风速率用：累计收到的帧数与起始时间。
+    mic_frames_seen: u32,
+    mic_t0: Option<std::time::Instant>,
+    mic_rate_logged: bool,
     write_started: bool,
     session_started: bool,
     stopped: bool,
@@ -242,6 +246,9 @@ impl Recorder {
             mic_wait_buffers: 0,
             mic_peak: 0.0,
             mic_underruns: 0,
+            mic_frames_seen: 0,
+            mic_t0: None,
+            mic_rate_logged: false,
             write_started: false,
             session_started: false,
             stopped: false,
@@ -517,6 +524,23 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
         if let Some((pcm, peak)) = audio::extract_canonical(buffer) {
             state.mic_started_at = Some(std::time::Instant::now());
             state.mic_peak = state.mic_peak.max(peak);
+            // 实测每秒收到多少麦克风帧，用来核对 ASBD 声明的采样率。
+            let t0 = *state.mic_t0.get_or_insert_with(std::time::Instant::now);
+            state.mic_frames_seen += (pcm.len() / audio::CHANNELS) as u32;
+            let elapsed = t0.elapsed().as_secs_f64();
+            if elapsed >= 0.5 {
+                let measured = (state.mic_frames_seen as f64 / elapsed).round() as u32;
+                audio::set_measured_mic_rate(measured);
+            }
+            if !state.mic_rate_logged && elapsed >= 1.5 {
+                state.mic_rate_logged = true;
+                log(&format!(
+                    "mic: measured {:.0} frames/s over {:.1}s (resampled to {} Hz)",
+                    state.mic_frames_seen as f64 / elapsed,
+                    elapsed,
+                    audio::RATE as u32
+                ));
+            }
             let room = audio::MAX_QUEUED_FRAMES.saturating_sub(state.mic_queue.len());
             let take = pcm.len().min(room);
             state.mic_queue.extend_from_slice(&pcm[..take]);
@@ -538,11 +562,10 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
         }
         if state.settings.audio.wants_mic() {
             let replace = state.settings.audio == AudioSource::Mic;
-            let before = state.mic_queue.len();
-            audio::mix_into(buffer, &mut state.mic_queue, replace);
-            if before == 0 || state.mic_queue.is_empty() {
+            if state.mic_queue.is_empty() {
                 state.mic_underruns += 1;
             }
+            audio::mix_into(buffer, &mut state.mic_queue, replace);
         }
         if let Some(audio_in) = &state.audio_in {
             if unsafe { audio_in.isReadyForMoreMediaData() } {

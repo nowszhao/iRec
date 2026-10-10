@@ -18,6 +18,22 @@ pub const CHANNELS: usize = 2;
 /// 这里统一放大约 +10 dB（可按需调整）。
 pub const MIC_GAIN: f32 = 1.8;
 
+/// 实测得到的麦克风速率（Hz）。ScreenCaptureKit 声明的采样率在部分机器上是
+/// 实际送达速率的一半（声明 24 kHz、实际 48 kHz），直接照声明重采样会把声音
+/// 放慢一倍，所以这里用实测值，测量出来之前才回落到 ASBD。
+static MEASURED_MIC_RATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_measured_mic_rate(hz: u32) {
+    MEASURED_MIC_RATE.store(hz, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn measured_mic_rate() -> Option<f64> {
+    match MEASURED_MIC_RATE.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        hz => Some(hz as f64),
+    }
+}
+
 /// 分别记录麦克风 / 系统声音的输入格式（各一次）。
 static LOG_MIC_FORMAT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LOG_SYS_FORMAT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -226,6 +242,10 @@ fn resample(input: &[f32], from: f64, to: f64) -> Vec<f32> {
 /// 麦克风采样 → 48 kHz 立体声交错的 f32，同时返回这段的峰值（整段统计用）。
 pub fn extract_canonical(buffer: &CMSampleBuffer) -> Option<(Vec<f32>, f32)> {
     let (fmt, planar) = read_planar(buffer)?;
+    let fmt = Format {
+        rate: measured_mic_rate().unwrap_or(fmt.rate),
+        ..fmt
+    };
     let channels: Vec<Vec<f32>> = match planar.len() {
         0 => return None,
         1 => vec![resample(&planar[0], fmt.rate, RATE); 2],

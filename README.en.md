@@ -57,8 +57,8 @@ Grab the package that matches your Mac from
 If unsure, run `uname -m`: `arm64` means Apple Silicon, `x86_64` means Intel.
 Unzip and drag `iRec.app` into Applications.
 
-The bundles are ad-hoc signed (not notarised), so Gatekeeper may block the first
-launch: right-click → Open, or run
+From v0.1.1 the bundles are Developer ID signed and notarised. If a package is
+unsigned, Gatekeeper may block the first launch: right-click → Open, or run
 `xattr -dr com.apple.quarantine /Applications/iRec.app`.
 
 ## Install & Build
@@ -104,8 +104,30 @@ Publishing: pushing a `v*` tag triggers GitHub Actions, which builds both
 architectures and creates the release.
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.1.1 && git push origin v0.1.1
 ```
+
+### Signing and notarisation (for distribution)
+
+The workflow signs with a Developer ID certificate and notarises. Add these
+repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Meaning |
+| --- | --- |
+| `MACOS_CERTIFICATE` | base64 of the Developer ID Application `.p12` |
+| `MACOS_CERTIFICATE_PASSWORD` | password of that `.p12` |
+| `KEYCHAIN_PASSWORD` | password for the temporary CI keychain (any string) |
+| `DEVELOPER_ID_APPLICATION` | signing identity, e.g. `Developer ID Application: Name (TEAMID)` |
+| `APPLE_ID` / `APPLE_TEAM_ID` / `APPLE_APP_PASSWORD` | Apple ID + app-specific password for notarisation |
+| or `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` / `APPLE_API_PRIVATE_KEY` | App Store Connect API key (base64 `.p8`) instead |
+
+Flow: `codesign --options runtime --timestamp` with `resources/iRec.entitlements`
+(hardened runtime needs `com.apple.security.device.audio-input` for the mic) → zip →
+`xcrun notarytool submit --wait` → `xcrun stapler staple`.
+
+Without those secrets the job still succeeds and falls back to ad-hoc signing (not
+notarised, so the quarantine workaround above is needed). You can also run
+`./scripts/sign_and_notarize.sh dist/arm64/iRec.app` locally.
 
 ## Usage
 

@@ -39,6 +39,7 @@ the desktop by default.
 | Save location | `~/Desktop` by default, change it with "Choose save location…" in the menu; persisted across restarts |
 | Encoding | HEVC hardware encoding, YUV420 sampling, adjustable quality / frame rate / resolution |
 | Output | MP4 (HEVC + AAC) named `iRec-YYYYMMDD-HHMMSS.mp4`, saved to `~/Desktop` |
+| Screenshots | `⇧⌘S` full screen, `⇧⌘A` region; saved as PNG (`iRec-shot-YYYYMMDD-HHMMSS.png`) and hung on the line |
 | The line | Finished recordings hang from a clothesline under the menu bar: rest the pointer there to drop it, click a card to reveal it in Finder, drag it into an app or a folder, click the cross to take it off |
 
 ## Requirements
@@ -226,7 +227,8 @@ instead of screenshots.
 ### Menu bar & settings
 
 The menu offers, in order: start recording (full screen), select record region, stop recording,
-audio (four-option submenu), quality (Smaller / Balanced / High / Max), frame rate (30 / 60), resolution
+screenshot (full screen), screenshot (region), audio (four-option submenu), quality
+(Smaller / Balanced / High / Max), frame rate (30 / 60), resolution
 (1x / 2x), show / hide the line, bring the line down when the pointer rests in the menu bar, hang
 recordings on the line, clear the line, reveal latest recording, open control window…, request /
 check permission, quit.
@@ -336,6 +338,13 @@ Options: `--seconds`, `--region x,y,w,h`, `--fps`, `--scale`, `--out <dir>`,
 `--audio off|system|mic|both` (`--no-audio` equals `off`).
 Set `SCREEN_REC_DEBUG=1` for capture/encoding diagnostics on stderr.
 
+Screenshots work from the command line too:
+
+```sh
+cargo run --release -- --shot --out /tmp/shots                            # full screen
+cargo run --release -- --shot --region 200,417,600,400 --scale 2          # region (y from the bottom)
+```
+
 ## Architecture notes
 
 | Module | Responsibility |
@@ -346,6 +355,7 @@ Set `SCREEN_REC_DEBUG=1` for capture/encoding diagnostics on stderr.
 | `src/overlay.rs` | Full-screen transparent `NSWindow` with a custom `NSView` for drag selection |
 | `src/hud.rs` | Persistent selection frame: outline window, control bar and resize grip working together |
 | `src/line.rs` | The line: two `NSPanel`s (rope and flight) with hand-drawn cards, springs integrated per frame |
+| `src/shot.rs` | Screenshots: `SCScreenshotManager` frame → PNG, then hung on the line |
 | `src/audio.rs` | PCM read-out, resampling and mixing (microphone into system audio) |
 | `src/state.rs` | Global settings and command queue (hotkeys, menu, picker all executed on the main-thread timer) |
 

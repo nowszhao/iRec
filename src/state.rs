@@ -17,6 +17,12 @@ pub enum Action {
     StartRegion(Rect),
     /// Stop whatever is currently recording.
     Stop,
+    /// Screenshot the whole screen.
+    ShotFull,
+    /// Open the region picker to screenshot the selection.
+    PickShot,
+    /// Screenshot the selected rectangle (Cocoa screen coordinates).
+    ShotRegion(Rect),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

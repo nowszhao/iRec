@@ -16,10 +16,12 @@ use objc2_foundation::{
 };
 
 use crate::hud;
-use crate::state::Rect;
+use crate::state::{Action, Rect, push_action};
 
 #[derive(Default)]
 struct RegionIvars {
+    /// 选完直接截图，而不是留下选区框等着录。
+    shot: Cell<bool>,
     start: Cell<Option<NSPoint>>,
     current: Cell<Option<NSPoint>>,
 }
@@ -70,8 +72,12 @@ define_class!(
                 .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
             if let Some(rect) = picked {
                 if rect.w >= 16.0 && rect.h >= 16.0 {
-                    // The frame stays on screen; recording starts from its bar.
-                    hud::show(rect);
+                    if self.ivars().shot.get() {
+                        push_action(Action::ShotRegion(rect));
+                    } else {
+                        // The frame stays on screen; recording starts from its bar.
+                        hud::show(rect);
+                    }
                 }
             }
         }
@@ -195,8 +201,9 @@ fn rect_from_points(a: NSPoint, b: NSPoint) -> NSRect {
 }
 
 /// Show the overlay on the main screen. The result arrives as an
-/// `Action::StartRegion`; a cancel delivers nothing.
-pub fn pick_region(mtm: MainThreadMarker) {
+/// 选完如果是截图模式就 push `Action::ShotRegion`，录制模式则留下选区框；取消什么都不做。
+/// `shot = true` 时选完直接截图，否则留下选区框等着录。
+pub fn pick_region(mtm: MainThreadMarker, shot: bool) {
     let app = NSApplication::sharedApplication(mtm);
     // Become a regular app briefly so the overlay can become key and take
     // keyboard events (Escape / any key cancels).
@@ -225,6 +232,7 @@ pub fn pick_region(mtm: MainThreadMarker) {
     window.setIgnoresMouseEvents(false);
 
     let view = RegionView::new(mtm);
+    view.ivars().shot.set(shot);
     view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
     view.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,

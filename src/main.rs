@@ -6,6 +6,7 @@ mod line;
 mod mic;
 mod overlay;
 mod recorder;
+mod shot;
 mod state;
 
 use std::cell::{OnceCell, RefCell};
@@ -142,6 +143,16 @@ define_class!(
         #[unsafe(method(stopRecording:))]
         fn stop_recording(&self, _sender: &AnyObject) {
             push_action(Action::Stop);
+        }
+
+        #[unsafe(method(shotFull:))]
+        fn shot_full(&self, _sender: &AnyObject) {
+            push_action(Action::ShotFull);
+        }
+
+        #[unsafe(method(shotRegion:))]
+        fn shot_region(&self, _sender: &AnyObject) {
+            push_action(Action::PickShot);
         }
 
         #[unsafe(method(setAudioSource:))]
@@ -760,7 +771,7 @@ impl AppDelegate {
                     self.finish();
                 } else {
                     hud::hide();
-                    pick_region(self.mtm());
+                    pick_region(self.mtm(), false);
                 }
             }
             Action::StartRegion(rect) => {
@@ -772,6 +783,16 @@ impl AppDelegate {
                 if recording {
                     self.finish();
                 }
+            }
+            Action::ShotFull => {
+                self.screenshot(None);
+            }
+            Action::PickShot => {
+                hud::hide();
+                pick_region(self.mtm(), true);
+            }
+            Action::ShotRegion(rect) => {
+                self.screenshot(Some(rect));
             }
         }
     }
@@ -908,6 +929,28 @@ impl AppDelegate {
             });
             line::set_busy(false);
         });
+    }
+
+    /// 截图：抓一帧存成 PNG，然后挂到晾衣绳上。
+    fn screenshot(&self, region: Option<Rect>) {
+        let settings = with_state(|s| s.settings.clone());
+        crate::shot::capture(
+            region,
+            settings.scale,
+            &settings.out_dir,
+            true,
+            move |result| match result {
+                Ok((path, bytes)) => with_state(|s| {
+                    s.last_saved = Some((path, bytes));
+                    s.saved_at = Some(Instant::now());
+                    s.last_error = None;
+                }),
+                Err(err) => {
+                    eprintln!("irec: {err}");
+                    with_state(|s| s.last_error = Some(err));
+                }
+            },
+        );
     }
 
     /// Used when quitting: block until the file is closed.
@@ -1286,6 +1329,10 @@ fn main() {
         selftest(&args);
         return;
     }
+    if args.iter().any(|a| a == "--shot") {
+        shot_cli(&args);
+        return;
+    }
 
     let mtm = MainThreadMarker::new().expect("irec must start on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -1305,6 +1352,57 @@ fn main() {
 }
 
 /// Headless smoke test: records for a few seconds and prints the result.
+/// 命令行截图：`irec --shot [--region x,y,w,h] [--scale 2] [--out ~/Desktop]`
+/// （Rect 的原点在屏幕左下、y 朝上，和录制用的坐标系一致。）
+fn shot_cli(args: &[String]) {
+    let region = arg_value(args, "--region").and_then(|v| {
+        let parts: Vec<f64> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if parts.len() == 4 {
+            Some(Rect {
+                x: parts[0],
+                y: parts[1],
+                w: parts[2],
+                h: parts[3],
+            })
+        } else {
+            None
+        }
+    });
+    let scale = arg_value(args, "--scale")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2.0);
+    let out = arg_value(args, "--out")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| with_state(|s| s.settings.out_dir.clone()));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    crate::shot::capture(region, scale, &out, false, move |result| {
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(Duration::from_secs(15)) {
+        Ok(Ok((path, bytes))) => println!(
+            "OK {} ({:.2} MB)",
+            path.display(),
+            bytes as f64 / 1_048_576.0
+        ),
+        Ok(Err(err)) => {
+            println!("FAILED: {err}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            println!("FAILED: 等截图结果超时");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
 fn selftest(args: &[String]) {
     fn value(args: &[String], flag: &str) -> Option<String> {
         args.iter()

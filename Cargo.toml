@@ -17,7 +17,7 @@ objc2-core-audio-types = "0.3.2"
 objc2-core-media = { version = "0.3.2", features = ["CMBlockBuffer", "objc2-core-audio-types"] }
 objc2-core-video = "0.3.2"
 objc2-foundation = "0.3.2"
-objc2-screen-capture-kit = { version = "0.3.2", features = ["SCStream", "SCShareableContent", "SCError", "objc2-core-media", "objc2-core-foundation", "objc2-core-graphics", "block2", "dispatch2"] }
+objc2-screen-capture-kit = { version = "0.3.2", features = ["SCStream", "SCShareableContent", "SCScreenshotManager", "SCError", "objc2-core-media", "objc2-core-foundation", "objc2-core-graphics", "block2", "dispatch2"] }
 objc2-uniform-type-identifiers = "0.3.2"
 
 [[bin]]

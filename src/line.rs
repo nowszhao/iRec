@@ -154,6 +154,8 @@ struct Peg {
     image: Retained<NSImage>,
     /// 照片区大小（不含玻璃边）。
     photo: NSSize,
+    /// 录屏（画播放键）还是截图。
+    video: bool,
     /// 静止时的倾角，随机 ±2.5°，看着像手夹上去的。
     tilt: f64,
     swing: f64,
@@ -287,6 +289,8 @@ struct Pending {
     image: Retained<CGImage>,
     path: PathBuf,
     region: Option<Rect>,
+    /// 录屏（有播放键）还是截图（没有）。
+    video: bool,
 }
 
 static PENDING: Mutex<Vec<Pending>> = Mutex::new(Vec::new());
@@ -673,6 +677,7 @@ impl LineView {
             path: pending.path,
             image: image.clone(),
             photo,
+            video: pending.video,
             tilt,
             swing: 0.0,
             swing_v: 0.0,
@@ -1250,7 +1255,9 @@ fn draw_line(view: &LineView) {
             item.hover_mix,
         );
         draw_clip(Some(&ctx), card, 1.0);
-        draw_play(card, 1.0);
+        if item.video {
+            draw_play(card, 1.0);
+        }
         if item.hover_mix > 0.01 {
             draw_close(card, item.hover_mix);
         }
@@ -1608,10 +1615,24 @@ pub fn hang_later(path: PathBuf, region: Option<Rect>) {
                     image,
                     path,
                     region,
+                    video: true,
                 });
         }
         Err(err) => crate::state::log(&format!("line: 缩略图生成失败：{err}")),
     });
+}
+
+/// 截图已经拿到图像了，直接挂上去（可以在任何线程调用）。
+pub fn hang_image(image: Retained<CGImage>, path: PathBuf, region: Option<Rect>) {
+    PENDING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(Pending {
+            image,
+            path,
+            region,
+            video: false,
+        });
 }
 
 #[allow(deprecated)]

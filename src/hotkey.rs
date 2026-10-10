@@ -48,6 +48,8 @@ pub const SHIFT_KEY: u32 = 512;
 /// Virtual key codes (kVK_ANSI_*).
 pub const KVK_ANSI_R: u32 = 15;
 pub const KVK_ANSI_E: u32 = 14;
+pub const KVK_ANSI_S: u32 = 1;
+pub const KVK_ANSI_A: u32 = 0;
 
 static HANDLER: Mutex<Option<EventHandlerRef>> = Mutex::new(None);
 static KEYS: Mutex<Vec<EventHotKeyRef>> = Mutex::new(Vec::new());
@@ -110,6 +112,8 @@ pub fn register_defaults() -> Result<(), String> {
 
     register(KVK_ANSI_R, CMD_KEY | SHIFT_KEY, 1)?;
     register(KVK_ANSI_E, CMD_KEY | SHIFT_KEY, 2)?;
+    register(KVK_ANSI_S, CMD_KEY | SHIFT_KEY, 3)?;
+    register(KVK_ANSI_A, CMD_KEY | SHIFT_KEY, 4)?;
     Ok(())
 }
 
@@ -169,6 +173,8 @@ unsafe extern "C" fn hotkey_handler(
         match id.id {
             1 => push_action(Action::ToggleFull),
             2 => push_action(Action::PickRegion),
+            3 => push_action(Action::ShotFull),
+            4 => push_action(Action::PickShot),
             _ => {}
         }
     }

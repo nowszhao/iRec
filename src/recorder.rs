@@ -817,7 +817,7 @@ unsafe extern "C" {
 
 /// Retries once after asking macOS for permission, so the very first recording
 /// works right after the user grants access.
-fn fetch_shareable_content() -> Result<Retained<SCShareableContent>, String> {
+pub(crate) fn fetch_shareable_content() -> Result<Retained<SCShareableContent>, String> {
     let (tx, rx) = std::sync::mpsc::channel::<Result<Retained<SCShareableContent>, String>>();
     let block = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
         let result = if content.is_null() {
@@ -839,7 +839,7 @@ fn fetch_shareable_content() -> Result<Retained<SCShareableContent>, String> {
 }
 
 /// Windows owned by this process, to be excluded from the capture.
-fn own_windows(content: &SCShareableContent) -> Retained<NSArray<SCWindow>> {
+pub(crate) fn own_windows(content: &SCShareableContent) -> Retained<NSArray<SCWindow>> {
     let pid = std::process::id() as libc::pid_t;
     let mut own: Vec<Retained<SCWindow>> = Vec::new();
     for window in unsafe { content.windows() }.iter() {
@@ -853,7 +853,7 @@ fn own_windows(content: &SCShareableContent) -> Retained<NSArray<SCWindow>> {
     NSArray::from_retained_slice(&own)
 }
 
-fn main_display(content: &SCShareableContent) -> Result<Retained<SCDisplay>, String> {
+pub(crate) fn main_display(content: &SCShareableContent) -> Result<Retained<SCDisplay>, String> {
     let displays = unsafe { content.displays() };
     if displays.is_empty() {
         return Err("没有找到可录制的显示器".to_string());
@@ -867,7 +867,7 @@ fn main_display(content: &SCShareableContent) -> Result<Retained<SCDisplay>, Str
     Ok(displays.objectAtIndex(0))
 }
 
-fn unique_output_path(dir: &Path) -> PathBuf {
+pub(crate) fn unique_output_path(dir: &Path) -> PathBuf {
     let stamp = local_timestamp();
     let mut candidate = dir.join(format!("iRec-{stamp}.mp4"));
     let mut i = 1;
@@ -878,7 +878,7 @@ fn unique_output_path(dir: &Path) -> PathBuf {
     candidate
 }
 
-fn local_timestamp() -> String {
+pub(crate) fn local_timestamp() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as libc::time_t)

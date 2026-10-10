@@ -90,6 +90,8 @@ pub struct RecorderState {
     mic_wait_buffers: u32,
     /// 整段录制中麦克风的最大峰值，停止时写入日志，便于判断输入电平。
     mic_peak: f32,
+    /// 混音时麦克风队列不够用（欠载）的次数，停止时写日志。
+    mic_underruns: u32,
     write_started: bool,
     session_started: bool,
     stopped: bool,
@@ -239,6 +241,7 @@ impl Recorder {
             mic_started_at: None,
             mic_wait_buffers: 0,
             mic_peak: 0.0,
+            mic_underruns: 0,
             write_started: false,
             session_started: false,
             stopped: false,
@@ -391,8 +394,8 @@ impl Recorder {
             if let Ok(state) = shared.lock() {
                 if state.settings.audio.wants_mic() {
                     log(&format!(
-                        "mic peak over recording={:.5} (gain x{})",
-                        state.mic_peak, audio::MIC_GAIN
+                        "mic: peak={:.5} (gain x{}) underrun_buffers={}",
+                        state.mic_peak, audio::MIC_GAIN, state.mic_underruns
                     ));
                 }
             }
@@ -535,7 +538,11 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
         }
         if state.settings.audio.wants_mic() {
             let replace = state.settings.audio == AudioSource::Mic;
+            let before = state.mic_queue.len();
             audio::mix_into(buffer, &mut state.mic_queue, replace);
+            if before == 0 || state.mic_queue.is_empty() {
+                state.mic_underruns += 1;
+            }
         }
         if let Some(audio_in) = &state.audio_in {
             if unsafe { audio_in.isReadyForMoreMediaData() } {

@@ -18,6 +18,8 @@ pub const CHANNELS: usize = 2;
 /// 这里统一放大约 +10 dB（可按需调整）。
 pub const MIC_GAIN: f32 = 3.2;
 
+static LOG_FORMAT: std::sync::Once = std::sync::Once::new();
+
 const FORMAT_LINEAR_PCM: u32 = 0x6C70_636D; // 'lpcm'
 const FLAG_FLOAT: u32 = 1 << 0;
 const FLAG_PACKED: u32 = 1 << 3;
@@ -40,6 +42,13 @@ fn format_of(buffer: &CMSampleBuffer) -> Option<Format> {
         return None;
     }
     let a = unsafe { &*asbd };
+    LOG_FORMAT.call_once(|| {
+        crate::state::log(&format!(
+            "audio format: rate={} ch={} bits={} {}",
+            a.mSampleRate, a.mChannelsPerFrame, a.mBitsPerChannel,
+            if (a.mFormatFlags & FLAG_FLOAT) != 0 { "float" } else { "int" }
+        ))
+    });
     if a.mFormatID != FORMAT_LINEAR_PCM || (a.mFormatFlags & FLAG_PACKED) == 0 {
         return None;
     }
@@ -233,12 +242,23 @@ pub fn mix_into(buffer: &CMSampleBuffer, mic: &mut Vec<f32>, replace: bool) -> b
     }
     let channels = if raw.interleaved { fmt.channels } else { raw.ptrs.len() };
     let step = RATE / fmt.rate.max(1.0);
+    let available = mic.len() / CHANNELS;
 
     for c in 0..channels {
         let ptr = raw.ptrs[if raw.interleaved { 0 } else { c }];
         for i in 0..frames {
-            let mic_index = ((i as f64 * step).round() as usize) * CHANNELS + c.min(CHANNELS - 1);
-            let mic_sample = mic.get(mic_index).copied().unwrap_or(0.0) * MIC_GAIN;
+            let pos = i as f64 * step;
+            let left = pos.floor() as usize;
+            let mic_sample = if left + 1 < available {
+                let frac = (pos - left as f64) as f32;
+                let a = mic[left * CHANNELS + c.min(CHANNELS - 1)];
+                let b = mic[(left + 1) * CHANNELS + c.min(CHANNELS - 1)];
+                a + (b - a) * frac
+            } else {
+                mic.get(left * CHANNELS + c.min(CHANNELS - 1))
+                    .copied()
+                    .unwrap_or(0.0)
+            } * MIC_GAIN;
             let index = if raw.interleaved { i * fmt.channels + c } else { i };
             let current = if replace { 0.0 } else { read_sample(&fmt, ptr, index) };
             let mixed = (current + mic_sample).clamp(-1.0, 1.0);

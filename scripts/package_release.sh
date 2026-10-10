@@ -19,6 +19,7 @@ mkdir -p "$DIST"
 for ARCH in arm64 x86_64; do
   STAGE="$DIST/$ARCH"
   ARCH="$ARCH" ./scripts/build_app.sh "$STAGE"
+  ./scripts/sign_and_notarize.sh "$STAGE/iRec.app"
   (cd "$STAGE" && zip -qry "$DIST/iRec-$VERSION-$ARCH.zip" iRec.app)
   rm -rf "$STAGE"
 done

@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="iRec icon">
+  <defs>
+    <linearGradient id="bg" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#3C4E61"/>
+      <stop offset="0.55" stop-color="#1D2733"/>
+      <stop offset="1" stop-color="#0E141B"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#EAF3F8" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#EAF3F8" stop-opacity="0.03"/>
+    </linearGradient>
+    <linearGradient id="dot" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#FF9078"/>
+      <stop offset="0.45" stop-color="#F4503C"/>
+      <stop offset="1" stop-color="#C8241B"/>
+    </linearGradient>
+    <linearGradient id="bracket" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7FE9F5"/>
+      <stop offset="1" stop-color="#2CB6D8"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FF5A45" stop-opacity="0.5"/>
+      <stop offset="0.55" stop-color="#FF5A45" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#FF5A45" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- squircle base -->
+  <path fill="url(#bg)" d="M296 96 H728 C856 96 928 168 928 296 V728 C928 856 856 928 728 928 H296 C168 928 96 856 96 728 V296 C96 168 168 96 296 96 Z"/>
+  <path fill="none" stroke="#FFFFFF" stroke-opacity="0.14" stroke-width="4" d="M296 100 H728 C853 100 924 171 924 296 V728 C924 853 853 924 728 924 H296 C171 924 100 853 100 728 V296 C100 171 171 100 296 100 Z"/>
+
+  <!-- screen panel -->
+  <rect x="184" y="256" width="656" height="452" rx="46" fill="url(#panel)"/>
+  <rect x="184" y="256" width="656" height="452" rx="46" fill="none" stroke="#A9C0D0" stroke-opacity="0.32" stroke-width="6"/>
+
+  <!-- region selection brackets -->
+  <g fill="none" stroke="url(#bracket)" stroke-width="22" stroke-linecap="round">
+    <path d="M234 352 V306 H280"/>
+    <path d="M744 306 H790 V352"/>
+    <path d="M790 612 V658 H744"/>
+    <path d="M280 658 H234 V612"/>
+  </g>
+
+  <!-- record dot -->
+  <circle cx="512" cy="482" r="196" fill="url(#glow)"/>
+  <circle cx="512" cy="482" r="88" fill="url(#dot)"/>
+  <circle cx="512" cy="482" r="88" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="4"/>
+</svg>

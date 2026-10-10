@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>iRec</string>
+	<key>CFBundleDisplayName</key>
+	<string>iRec</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.nows.irec</string>
+	<key>CFBundleExecutable</key>
+	<string>iRec</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>iRec 需要“屏幕录制”权限才能录制屏幕画面与系统声音。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>iRec 仅在开启麦克风录制时需要访问麦克风。</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>iRec 需要在访达中显示录制好的视频文件。</string>
+</dict>
+</plist>

@@ -155,9 +155,9 @@ fn mic_pump(state: Shared, stop: Arc<AtomicBool>) {
         }
         let pts = start + s.mic_frames_written as f64 / audio::RATE;
         s.mic_frames_written += (chunk.len() / audio::CHANNELS) as u64;
-        s.mic_peak = s
-            .mic_peak
-            .max(chunk.iter().fold(0.0f32, |m, v| m.max(v.abs())));
+        // 独立音轨不经过 write_into，增益在这里加。
+        let gained_peak = audio::apply_mic_gain(&mut chunk);
+        s.mic_peak = s.mic_peak.max(gained_peak);
         if let Some(buf) = audio::make_pcm_buffer(&chunk, pts) {
             let _ = unsafe { input.appendSampleBuffer(&buf) };
         }

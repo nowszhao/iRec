@@ -16,9 +16,9 @@ use objc2_core_media::{
 pub const RATE: f64 = 48_000.0;
 pub const CHANNELS: usize = 2;
 
-/// 麦克风增益。Mac 内建麦克风实测峰值只有 -54 dB 左右，直接混入几乎听不见，
-/// 这里统一放大约 +10 dB（可按需调整）。
-pub const MIC_GAIN: f32 = 1.8;
+/// 麦克风增益。AVAudioEngine 直接给出的电平偏低（本机实测峰值约 -27 dB），
+/// 写进音轨前统一放大约 +16 dB（可按需调整）。
+pub const MIC_GAIN: f32 = 6.0;
 
 /// 实测得到的麦克风速率（Hz）。ScreenCaptureKit 声明的采样率在部分机器上是
 /// 实际送达速率的一半（声明 24 kHz、实际 48 kHz），直接照声明重采样会把声音
@@ -332,6 +332,17 @@ unsafe extern "C-unwind" fn free_block(
 }
 
 const K_CM_TIME_VALID: u32 = 1;
+
+/// 给麦克风 PCM 加增益并软限幅（写独立音轨前调用）。
+pub fn apply_mic_gain(pcm: &mut [f32]) -> f32 {
+    let mut peak = 0.0f32;
+    for v in pcm.iter_mut() {
+        let g = soft_limit(*v * MIC_GAIN);
+        *v = g;
+        peak = peak.max(g.abs());
+    }
+    peak
+}
 
 /// 用 48 kHz 立体声交错的 float PCM 构造一个 CMSampleBuffer（麦克风独立音轨用）。
 pub fn make_pcm_buffer(pcm: &[f32], pts_seconds: f64) -> Option<Retained<CMSampleBuffer>> {

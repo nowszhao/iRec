@@ -88,6 +88,8 @@ pub struct RecorderState {
     /// 已收到麦克风采样；未收到时用于提示用户检查权限与输入设备。
     mic_started_at: Option<std::time::Instant>,
     mic_wait_buffers: u32,
+    /// 整段录制中麦克风的最大峰值，停止时写入日志，便于判断输入电平。
+    mic_peak: f32,
     write_started: bool,
     session_started: bool,
     stopped: bool,
@@ -236,6 +238,7 @@ impl Recorder {
             mic_unsupported_logged: false,
             mic_started_at: None,
             mic_wait_buffers: 0,
+            mic_peak: 0.0,
             write_started: false,
             session_started: false,
             stopped: false,
@@ -384,6 +387,16 @@ impl Recorder {
             return Err(format!("视频未正常完成：{detail}"));
         }
 
+        if let Some(shared) = CURRENT.lock().ok().and_then(|g| g.clone()) {
+            if let Ok(state) = shared.lock() {
+                if state.settings.audio.wants_mic() {
+                    log(&format!(
+                        "mic peak over recording={:.5} (gain x{})",
+                        state.mic_peak, audio::MIC_GAIN
+                    ));
+                }
+            }
+        }
         let bytes = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         Ok((self.path.clone(), bytes, frames))
     }
@@ -501,8 +514,9 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
         }
     } else if r#type.0 == SCStreamOutputType::Microphone.0 {
         // 麦克风：先排队，等系统声音的采样到达时一起混音。
-        if let Some(pcm) = audio::extract_canonical(buffer) {
+        if let Some((pcm, peak)) = audio::extract_canonical(buffer) {
             state.mic_started_at = Some(std::time::Instant::now());
+            state.mic_peak = state.mic_peak.max(peak);
             let room = audio::MAX_QUEUED_FRAMES.saturating_sub(state.mic_queue.len());
             let take = pcm.len().min(room);
             state.mic_queue.extend_from_slice(&pcm[..take]);

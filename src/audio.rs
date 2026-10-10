@@ -18,8 +18,6 @@ pub const CHANNELS: usize = 2;
 /// 这里统一放大约 +10 dB（可按需调整）。
 pub const MIC_GAIN: f32 = 3.2;
 
-static PEAK_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 const FORMAT_LINEAR_PCM: u32 = 0x6C70_636D; // 'lpcm'
 const FLAG_FLOAT: u32 = 1 << 0;
 const FLAG_PACKED: u32 = 1 << 3;
@@ -190,8 +188,8 @@ fn resample(input: &[f32], from: f64, to: f64) -> Vec<f32> {
     out
 }
 
-/// 麦克风采样 → 48 kHz 立体声交错的 f32，供混音器排队。
-pub fn extract_canonical(buffer: &CMSampleBuffer) -> Option<Vec<f32>> {
+/// 麦克风采样 → 48 kHz 立体声交错的 f32，同时返回这段的峰值（整段统计用）。
+pub fn extract_canonical(buffer: &CMSampleBuffer) -> Option<(Vec<f32>, f32)> {
     let (fmt, planar) = read_planar(buffer)?;
     let channels: Vec<Vec<f32>> = match planar.len() {
         0 => return None,
@@ -208,10 +206,7 @@ pub fn extract_canonical(buffer: &CMSampleBuffer) -> Option<Vec<f32>> {
         out.push(channels[1][i]);
         peak = peak.max(channels[0][i].abs()).max(channels[1][i].abs());
     }
-    if !PEAK_LOGGED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        crate::state::log(&format!("mic peak sample={peak:.5}"));
-    }
-    Some(out)
+    Some((out, peak))
 }
 
 /// 把排队的麦克风采样写回系统声音的采样缓冲。
@@ -221,7 +216,7 @@ pub fn extract_canonical(buffer: &CMSampleBuffer) -> Option<Vec<f32>> {
 static LOGGED_MIX_FORMAT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn mix_into(buffer: &CMSampleBuffer, mic: &mut Vec<f32>, replace: bool) -> bool {
-    if mic.is_empty() {
+    if mic.is_empty() && !replace {
         return false;
     }
     let Some(fmt) = format_of(buffer) else { return false };

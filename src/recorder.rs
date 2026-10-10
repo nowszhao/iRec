@@ -531,24 +531,22 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
             objc2_core_media::CMTimeGetSeconds(buffer.presentation_time_stamp())
         };
         let raw_frames = unsafe { buffer.num_samples() } as u32;
-        // 真实采样率 = 原始帧数 / PTS 间隔，不依赖 ASBD 的声明值。
-        if let Some(last) = state.last_mic_pts {
-            let dt = mic_pts - last;
-            if dt > 0.0 {
-                let rate = raw_frames as f64 / dt;
-                if rate > 1000.0 && rate < 200_000.0 {
-                    audio::set_measured_mic_rate(rate.round() as u32);
-                    if !state.mic_rate_logged {
-                        state.mic_rate_logged = true;
-                        log(&format!(
-                            "mic: measured rate={:.0} Hz from PTS (num_samples={raw_frames})",
-                            rate
-                        ));
-                    }
-                }
+        // 真实采样率 = 原始帧数 / 墙上时钟，既不依赖 ASBD 声明值，也不受 PTS
+        // 时间基准影响（麦克风和系统声音的 PTS 未必同源）。
+        let t0 = *state.mic_t0.get_or_insert_with(std::time::Instant::now);
+        state.mic_frames_seen += raw_frames;
+        let elapsed = t0.elapsed().as_secs_f64();
+        if elapsed >= 0.5 {
+            let measured = (state.mic_frames_seen as f64 / elapsed).round() as u32;
+            audio::set_measured_mic_rate(measured);
+            if !state.mic_rate_logged && elapsed >= 1.5 {
+                state.mic_rate_logged = true;
+                log(&format!(
+                    "mic: measured rate={} Hz over {:.1}s (raw frames/s, asbd says different)",
+                    measured, elapsed
+                ));
             }
         }
-        state.last_mic_pts = Some(mic_pts);
         if let Some((pcm, peak)) = audio::extract_canonical(buffer) {
             state.mic_started_at = Some(std::time::Instant::now());
             state.mic_peak = state.mic_peak.max(peak);
@@ -576,25 +574,10 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
         }
         if state.settings.audio.wants_mic() {
             let replace = state.settings.audio == AudioSource::Mic;
-            // 按时间轴取这段系统缓冲对应的麦克风采样，避免两路速率差导致的漂移。
-            let frames = audio::buffer_frames(buffer).unwrap_or(0);
-            let pts = unsafe {
-                objc2_core_media::CMTimeGetSeconds(buffer.presentation_time_stamp())
-            };
-            let duration = frames as f64 / audio::RATE;
-            let mut queue_pts = state.mic_queue_pts.unwrap_or(pts);
-            let samples = audio::take_range(
-                &mut state.mic_queue,
-                &mut queue_pts,
-                pts,
-                pts + duration,
-                frames,
-            );
-            state.mic_queue_pts = Some(queue_pts);
-            if samples.iter().all(|v| *v == 0.0) {
+            if state.mic_queue.is_empty() {
                 state.mic_underruns += 1;
             }
-            audio::write_into(buffer, &samples, replace);
+            audio::write_into(buffer, &mut state.mic_queue, replace);
         }
         if let Some(audio_in) = &state.audio_in {
             if unsafe { audio_in.isReadyForMoreMediaData() } {

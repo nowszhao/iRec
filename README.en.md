@@ -44,6 +44,23 @@ the desktop by default.
 - Screen Recording permission (requested on first real capture — see [Permissions](#permissions--troubleshooting))
 - To build: a Rust toolchain (edition 2024) and Xcode command line tools
 
+## Download
+
+Grab the package that matches your Mac from
+[Releases](https://github.com/nowszhao/iRec/releases):
+
+| Mac | Package |
+| --- | --- |
+| Apple Silicon (M1 / M2 / M3 / M4 …) | `iRec-<version>-arm64.zip` |
+| Intel | `iRec-<version>-x86_64.zip` |
+
+If unsure, run `uname -m`: `arm64` means Apple Silicon, `x86_64` means Intel.
+Unzip and drag `iRec.app` into Applications.
+
+The bundles are ad-hoc signed (not notarised), so Gatekeeper may block the first
+launch: right-click → Open, or run
+`xattr -dr com.apple.quarantine /Applications/iRec.app`.
+
 ## Install & Build
 
 ```sh
@@ -66,6 +83,28 @@ Install into Applications:
 
 ```sh
 cp -R target/release/iRec.app /Applications/
+```
+
+Build for a specific architecture (default: the current machine):
+
+```sh
+./scripts/build_app.sh                 # host architecture
+ARCH=arm64 ./scripts/build_app.sh      # Apple Silicon
+ARCH=x86_64 ./scripts/build_app.sh     # Intel (cross-compiled)
+ARCH=universal ./scripts/build_app.sh  # universal binary (lipo)
+```
+
+Build the release packages (one zip per architecture + SHA256SUMS into `dist/`):
+
+```sh
+./scripts/package_release.sh
+```
+
+Publishing: pushing a `v*` tag triggers GitHub Actions, which builds both
+architectures and creates the release.
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
 ## Usage
@@ -236,6 +275,7 @@ the recording.
 ## Known limitations
 
 - Only the main display is recorded.
+- Release bundles are not notarised, so other machines need the quarantine workaround above.
 - System audio (what applications play) is captured; microphone input is not.
 - Hotkeys are fixed to `⇧⌘R` / `⇧⌘E` (see `register_defaults` in `src/hotkey.rs`).
 - Adjusting the selection during a recording does not change the framing of the current video.

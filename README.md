@@ -43,6 +43,22 @@ macOS 菜单栏常驻的屏幕录制工具，Rust 编写。全屏或选区录制
 - 屏幕录制权限（首次实际采集时申请，见[权限与排错](#权限与排错)）
 - 构建：Rust 工具链（edition 2024），Xcode 命令行工具
 
+## 下载
+
+从 [Releases](https://github.com/nowszhao/iRec/releases) 下载对应芯片的包：
+
+| 机型 | 包 |
+| --- | --- |
+| Apple Silicon（M1 / M2 / M3 / M4 …） | `iRec-<版本>-arm64.zip` |
+| Intel | `iRec-<版本>-x86_64.zip` |
+
+不确定就先在终端执行 `uname -m`：`arm64` 选第一个，`x86_64` 选第二个。
+下载后解压，把 `iRec.app` 拖进「应用程序」。
+
+包是 ad-hoc 签名（未用 Developer ID 公证），首次打开可能被 Gatekeeper 拦住：
+在 Finder 里**右键 → 打开**，或执行
+`xattr -dr com.apple.quarantine /Applications/iRec.app`。
+
 ## 安装与构建
 
 ```sh
@@ -219,6 +235,7 @@ cargo run --release -- --selftest --seconds 5 --audio both                # 系�
 ## 已知限制
 
 - 仅录制主显示器。
+- 发布包未公证，跨机器分发时需要按上面的方式解除隔离属性。
 - 录制的是系统声音（各应用播放的音频），不含麦克风输入。
 - 快捷键固定为 `⇧⌘R` / `⇧⌘E`（见 `src/hotkey.rs` 的 `register_defaults`）。
 - 录制中调整选区不会改变当前视频的取景范围。

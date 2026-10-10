@@ -8,6 +8,7 @@ mod recorder;
 mod state;
 
 use std::cell::{OnceCell, RefCell};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -19,8 +20,8 @@ use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSBackingStoreType, NSBezierPath, NSButton, NSButtonType, NSColor,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSImage, NSMenu, NSMenuItem,
-    NSPopUpButton, NSStatusBar, NSStatusItem, NSTextField, NSWarningAlertStyle, NSWindow,
-    NSWindowStyleMask, NSWorkspace,
+    NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSStatusBar, NSStatusItem, NSTextField,
+    NSWarningAlertStyle, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
 use objc2_foundation::{
@@ -31,8 +32,8 @@ use objc2_foundation::{
 use crate::overlay::pick_region;
 use crate::recorder::Recorder;
 use crate::state::{
-    init_state, log, push_action, with_state, Action, AppState, AudioSource, Quality, Rect,
-    Settings, STATE,
+    dirs_desktop, init_state, load_persisted, log, persist, push_action, with_state, Action,
+    AppState, AudioSource, Quality, Rect, Settings, STATE,
 };
 
 #[derive(Default)]
@@ -47,6 +48,8 @@ struct AppIvars {
     window: OnceCell<Retained<NSWindow>>,
     status_label: OnceCell<Retained<NSTextField>>,
     audio_popup: OnceCell<Retained<NSPopUpButton>>,
+    out_dir_item: OnceCell<Retained<NSMenuItem>>,
+    out_dir_button: OnceCell<Retained<NSButton>>,
     start_button: OnceCell<Retained<NSButton>>,
     region_button: OnceCell<Retained<NSButton>>,
     stop_button: OnceCell<Retained<NSButton>>,
@@ -141,7 +144,10 @@ define_class!(
                 .get(tag.max(0) as usize)
                 .copied()
                 .unwrap_or(AudioSource::System);
-            with_state(|s| s.settings.audio = source);
+            with_state(|s| {
+                s.settings.audio = source;
+                persist(&s.settings);
+            });
             if source.wants_mic() {
                 request_mic_access();
             }
@@ -154,7 +160,10 @@ define_class!(
                 .get(index)
                 .copied()
                 .unwrap_or(AudioSource::System);
-            with_state(|s| s.settings.audio = source);
+            with_state(|s| {
+                s.settings.audio = source;
+                persist(&s.settings);
+            });
             if source.wants_mic() {
                 request_mic_access();
             }
@@ -182,6 +191,35 @@ define_class!(
         fn set_scale(&self, sender: &AnyObject) {
             let tag: i64 = unsafe { objc2::msg_send![sender, tag] };
             with_state(|s| s.settings.scale = tag as f64 / 10.0);
+        }
+
+        #[unsafe(method(chooseOutputDir:))]
+        fn choose_output_dir(&self, _sender: &AnyObject) {
+            let panel = NSOpenPanel::openPanel(self.mtm());
+            panel.setCanChooseDirectories(true);
+            panel.setCanChooseFiles(false);
+            panel.setCanCreateDirectories(true);
+            panel.setPrompt(Some(&NSString::from_str("选择")));
+            panel.setMessage(Some(&NSString::from_str("录制的视频会保存到这个位置")));
+            if panel.runModal() == NSModalResponseOK {
+                if let Some(url) = panel.URL() {
+                    if let Some(path) = url.path() {
+                        with_state(|s| {
+                            s.settings.out_dir = std::path::PathBuf::from(path.to_string());
+                            persist(&s.settings);
+                        });
+                        log(&format!("output dir -> {}", path));
+                    }
+                }
+            }
+        }
+
+        #[unsafe(method(resetOutputDir:))]
+        fn reset_output_dir(&self, _sender: &AnyObject) {
+            with_state(|s| {
+                s.settings.out_dir = dirs_desktop();
+                persist(&s.settings);
+            });
         }
 
         #[unsafe(method(showWindow:))]
@@ -221,20 +259,29 @@ define_class!(
         fn quality_changed(&self, sender: &NSPopUpButton) {
             let index = sender.indexOfSelectedItem().max(0) as usize;
             let quality = Quality::all().get(index).copied().unwrap_or(Quality::Balanced);
-            with_state(|s| s.settings.quality = quality);
+            with_state(|s| {
+                s.settings.quality = quality;
+                persist(&s.settings);
+            });
         }
 
         #[unsafe(method(fpsChanged:))]
         fn fps_changed(&self, sender: &NSPopUpButton) {
             let index = sender.indexOfSelectedItem();
             let fps = if index == 1 { 60 } else { 30 };
-            with_state(|s| s.settings.fps = fps);
+            with_state(|s| {
+                s.settings.fps = fps;
+                persist(&s.settings);
+            });
         }
 
         #[unsafe(method(scaleChanged:))]
         fn scale_changed(&self, sender: &NSPopUpButton) {
             let index = sender.indexOfSelectedItem();
-            with_state(|s| s.settings.scale = if index == 1 { 2.0 } else { 1.0 });
+            with_state(|s| {
+                s.settings.scale = if index == 1 { 2.0 } else { 1.0 };
+                persist(&s.settings);
+            });
         }
 
         #[unsafe(method(revealLast:))]
@@ -268,6 +315,8 @@ impl AppDelegate {
     }
 
     fn setup(&self, mtm: MainThreadMarker) {
+        with_state(|s| load_persisted(&mut s.settings));
+
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
         if let Some(button) = item.button(mtm) {
             button.setTitle(ns_string!("REC"));
@@ -300,7 +349,7 @@ impl AppDelegate {
     /// Builds the control window: buttons, quality pickers and live status.
     fn build_window(&self, mtm: MainThreadMarker) -> Retained<NSWindow> {
         let width = 360.0;
-        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, 470.0));
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, 508.0));
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -448,6 +497,17 @@ impl AppDelegate {
         content.addSubview(&status);
         self.ivars().status_label.set(status).ok();
 
+        y -= 44.0;
+        let out_dir = make_button(
+            mtm,
+            "保存位置：选择…",
+            sel!(chooseOutputDir:),
+            NSRect::new(NSPoint::new(20.0, y), NSSize::new(width - 40.0, 30.0)),
+            self,
+        );
+        content.addSubview(&out_dir);
+        self.ivars().out_dir_button.set(out_dir).ok();
+
         y -= 40.0;
         let reveal = make_button(
             mtm,
@@ -563,6 +623,29 @@ impl AppDelegate {
 
         let reveal = menu_item(mtm, "在访达中显示最新录制", Some(sel!(revealLast:)), self, 0);
         menu.addItem(&reveal);
+
+        let out_dir_item = menu_item(mtm, "保存位置：—", None, self, 0);
+        out_dir_item.setEnabled(false);
+        menu.addItem(&out_dir_item);
+        self.ivars().out_dir_item.set(out_dir_item).ok();
+
+        let choose = menu_item(
+            mtm,
+            "选择保存位置…",
+            Some(sel!(chooseOutputDir:)),
+            self,
+            0,
+        );
+        menu.addItem(&choose);
+
+        let reset_dir = menu_item(
+            mtm,
+            "恢复为桌面",
+            Some(sel!(resetOutputDir:)),
+            self,
+            0,
+        );
+        menu.addItem(&reset_dir);
 
         let open_window = menu_item(mtm, "打开控制窗口…", Some(sel!(showWindow:)), self, 0);
         menu.addItem(&open_window);
@@ -707,16 +790,23 @@ impl AppDelegate {
 
     /// Mirrors the current state into the control window.
     fn update_window(&self) {
-        let (label, recording, stopping, audio) = with_state(|s| {
+        let (label, recording, stopping, audio, out_dir) = with_state(|s| {
             (
                 window_status(s),
                 s.recorder.is_some(),
                 s.stopping,
                 s.settings.audio,
+                s.settings.out_dir.clone(),
             )
         });
         if let Some(field) = self.ivars().status_label.get() {
             field.setStringValue(&NSString::from_str(&label));
+        }
+        if let Some(button) = self.ivars().out_dir_button.get() {
+            button.setTitle(&NSString::from_str(&format!(
+                "保存位置：{}（点击更改）",
+                short_path(&out_dir)
+            )));
         }
         if let Some(popup) = self.ivars().audio_popup.get() {
             let index = AudioSource::all()
@@ -763,6 +853,12 @@ impl AppDelegate {
         for (index, item) in self.ivars().audio_items.borrow().iter() {
             let matches = AudioSource::all()[*index] == settings.audio;
             item.setState(state_value(matches));
+        }
+        if let Some(item) = self.ivars().out_dir_item.get() {
+            item.setTitle(&NSString::from_str(&format!(
+                "保存位置：{}",
+                short_path(&settings.out_dir)
+            )));
         }
         for (index, item) in self.ivars().quality_items.borrow().iter() {
             let matches = Quality::all()[*index] == settings.quality;
@@ -835,6 +931,18 @@ fn request_mic_access() {
         log(&format!("microphone access granted={}", granted.as_bool()));
     });
     unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &block) };
+}
+
+/// 把家目录缩写成 `~`，菜单里显示更紧凑。
+fn short_path(path: &Path) -> String {
+    let text = path.to_string_lossy().to_string();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = Path::new(&home).to_string_lossy().to_string();
+        if let Some(rest) = text.strip_prefix(&home) {
+            return format!("~{rest}");
+        }
+    }
+    text
 }
 
 fn make_label(mtm: MainThreadMarker, text: &str, frame: NSRect, size: f64) -> Retained<NSTextField> {

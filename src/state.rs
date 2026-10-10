@@ -129,6 +129,64 @@ impl Default for Settings {
     }
 }
 
+/// 设置持久化（NSUserDefaults）：保存路径等设置重启后仍然生效。
+const KEY_OUT_DIR: &str = "outDir";
+const KEY_AUDIO: &str = "audioSource";
+const KEY_QUALITY: &str = "quality";
+const KEY_FPS: &str = "fps";
+const KEY_SCALE: &str = "scale";
+
+pub fn load_persisted(settings: &mut Settings) {
+    use objc2_foundation::{NSUserDefaults, NSString};
+    let defaults = NSUserDefaults::standardUserDefaults();
+    if let Some(dir) = defaults.stringForKey(&NSString::from_str(KEY_OUT_DIR)) {
+        let path = PathBuf::from(dir.to_string());
+        if path.is_dir() {
+            settings.out_dir = path;
+        }
+    }
+    let audio = defaults.integerForKey(&NSString::from_str(KEY_AUDIO));
+    if audio >= 0 && (audio as usize) < AudioSource::all().len() {
+        settings.audio = AudioSource::all()[audio as usize];
+    }
+    let quality = defaults.integerForKey(&NSString::from_str(KEY_QUALITY));
+    if quality >= 0 && (quality as usize) < Quality::all().len() {
+        settings.quality = Quality::all()[quality as usize];
+    }
+    let fps = defaults.integerForKey(&NSString::from_str(KEY_FPS));
+    if fps == 30 || fps == 60 {
+        settings.fps = fps as i32;
+    }
+    let scale = defaults.doubleForKey(&NSString::from_str(KEY_SCALE));
+    if scale == 1.0 || scale == 2.0 {
+        settings.scale = scale;
+    }
+}
+
+pub fn persist(settings: &Settings) {
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSUserDefaults, NSString};
+    let defaults = NSUserDefaults::standardUserDefaults();
+    let dir = NSString::from_str(&settings.out_dir.to_string_lossy());
+    unsafe {
+        let value: &AnyObject =
+            &*(&*dir as *const NSString as *const AnyObject);
+        defaults.setObject_forKey(Some(value), &NSString::from_str(KEY_OUT_DIR));
+    }
+    let audio = AudioSource::all()
+        .iter()
+        .position(|a| *a == settings.audio)
+        .unwrap_or(1) as isize;
+    let quality = Quality::all()
+        .iter()
+        .position(|q| *q == settings.quality)
+        .unwrap_or(1) as isize;
+    defaults.setInteger_forKey(audio, &NSString::from_str(KEY_AUDIO));
+    defaults.setInteger_forKey(quality, &NSString::from_str(KEY_QUALITY));
+    defaults.setInteger_forKey(settings.fps as isize, &NSString::from_str(KEY_FPS));
+    defaults.setDouble_forKey(settings.scale, &NSString::from_str(KEY_SCALE));
+}
+
 pub struct AppState {
     pub settings: Settings,
     pub recorder: Option<Recorder>,

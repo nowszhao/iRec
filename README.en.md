@@ -34,7 +34,8 @@ the desktop by default.
 | Quiet menu-bar app | On launch it only appears in the menu bar (no Dock icon, no window); every action lives in the status item menu |
 | State-aware controls | Stop is greyed out while idle; start/region are greyed out while recording |
 | Never recorded | The control window and the selection frame use `NSWindowSharingType::None`, so they never appear in the capture |
-| Audio | Four modes: off / system audio / microphone / system + microphone (mixed into one track) |
+| Audio | Four modes: off / system audio / microphone / system + microphone (one track each) |
+| Save location | `~/Desktop` by default, change it with "Choose save location…" in the menu; persisted across restarts |
 | Encoding | HEVC hardware encoding, YUV420 sampling, adjustable quality / frame rate / resolution |
 | Output | MP4 (HEVC + AAC) named `iRec-YYYYMMDD-HHMMSS.mp4`, saved to `~/Desktop` |
 
@@ -205,6 +206,20 @@ Measured on a MacBook built-in display at 1728×1117, 30 fps, Balanced quality, 
 | --- | --- | --- | --- |
 | 2x (default, high) | 3456×2234 | 3.49 MB | ≈ 21 MB |
 | 1x (space saving) | 1728×1116 | 0.96 MB | ≈ 5.8 MB |
+
+## Save location
+
+The default is `~/Desktop`. The menu offers:
+
+- `Save location: ~/Desktop` (greyed out, just shows the current path)
+- `Choose save location…`: opens the system directory panel (folders can be created)
+- `Reset to Desktop`: back to `~/Desktop`
+
+The control window has a "Save location: … (click to change)" button as well.
+
+Settings are stored in `NSUserDefaults` (`com.nows.irec`), so they **survive a
+restart**; besides the save location, the audio source, quality, frame rate and
+resolution are remembered too. To clear them: `defaults delete com.nows.irec`.
 
 ## Audio
 

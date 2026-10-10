@@ -486,11 +486,12 @@ impl LineView {
             if !inside {
                 continue;
             }
-            let size = 20.0;
-            let on_close = lx >= left + 1.0
-                && lx <= left + 5.0 + size
-                && ly >= top - 1.0 - size
-                && ly <= top + 4.0;
+            // 叉画在卡片左上角（顶空间里往下 3 点起），命中范围比画出来的大一圈，好点。
+            let hit = 26.0;
+            let on_close = lx >= left - 3.0
+                && lx <= left + 3.0 + hit
+                && ly >= top - 3.0
+                && ly <= top + 3.0 + hit;
             return Some((index, on_close && item.hover_mix > 0.5));
         }
         None

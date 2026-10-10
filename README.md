@@ -48,7 +48,7 @@ macOS 菜单栏常驻的屏幕录制工具，Rust 编写。全屏或选区录制
 git clone ssh://git@ssh.github.com:443/nowszhao/iRec.git
 cd iRec
 
-./scripts/build_app.sh              # 编译 release 并打包为 ../outputs/iRec.app
+./scripts/build_app.sh              # 编译 release 并打包为 target/release/iRec.app
 cargo build --release               # 仅编译二进制（target/release/iRec）
 ```
 
@@ -62,7 +62,7 @@ SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build_app.sh
 安装到应用程序目录：
 
 ```sh
-cp -R ../outputs/iRec.app /Applications/
+cp -R target/release/iRec.app /Applications/
 ```
 
 ## 使用

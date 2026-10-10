@@ -1,5 +1,6 @@
 #!/bin/sh
-# Builds iRec.app into ../outputs (release binary + app bundle).
+# Builds iRec.app into target/release (release binary + app bundle).
+# Pass a directory as $1 to build somewhere else, e.g. ./scripts/build_app.sh /tmp
 #
 # Signs with a stable "Apple Development" identity when one is available, so
 # macOS keeps remembering the screen recording permission between rebuilds.
@@ -10,7 +11,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 cargo build --release
 
-OUT="${1:-../outputs}"
+OUT="${1:-target/release}"
 APP="$OUT/iRec.app"
 # Replace any previous copy: `cp -R` would otherwise nest the new bundle inside
 # the old one and the stale app keeps running.

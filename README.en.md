@@ -49,7 +49,7 @@ the desktop by default.
 git clone ssh://git@ssh.github.com:443/nowszhao/iRec.git
 cd iRec
 
-./scripts/build_app.sh              # release build packaged as ../outputs/iRec.app
+./scripts/build_app.sh              # release build packaged as target/release/iRec.app
 cargo build --release               # binary only (target/release/iRec)
 ```
 
@@ -63,7 +63,7 @@ SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build_app.sh
 Install into Applications:
 
 ```sh
-cp -R ../outputs/iRec.app /Applications/
+cp -R target/release/iRec.app /Applications/
 ```
 
 ## Usage

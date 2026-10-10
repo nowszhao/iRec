@@ -3,7 +3,7 @@
 //!
 //! Three windows cooperate:
 //! * `frame_win`  - click-through visual outline (cyan idle, red while recording)
-//! * `bar_win`    - control bar: size + timer + 开始录制 / 停止录制 + 关闭
+//! * `bar_win`    - control bar: size + timer + 截屏 / 开始录制 / 停止录制 + 关闭
 //! * `handle_win` - small grip at the bottom-right corner to resize the region
 //!
 //! All of them are excluded from the capture (see `recorder::own_windows`) so
@@ -25,7 +25,7 @@ use objc2_foundation::{
 
 use crate::state::{Action, Rect, push_action};
 
-const BAR_W: f64 = 320.0;
+const BAR_W: f64 = 396.0;
 const BAR_H: f64 = 34.0;
 const HANDLE: f64 = 18.0;
 const MIN_SIZE: f64 = 48.0;
@@ -43,6 +43,7 @@ struct Hud {
     frame_view: Retained<FrameView>,
     bar_win: Retained<NSWindow>,
     bar_label: Retained<NSTextField>,
+    bar_shot: Retained<NSButton>,
     bar_button: Retained<NSButton>,
     bar_close: Retained<NSButton>,
     handle_win: Retained<NSWindow>,
@@ -256,6 +257,16 @@ define_class!(
             }
         }
 
+        #[unsafe(method(hudShot:))]
+        fn hud_shot(&self, _sender: &AnyObject) {
+            let state = peek(|h| (h.rect, h.recording));
+            if let Some((rect, recording)) = state {
+                if !recording {
+                    push_action(Action::ShotRegion(rect));
+                }
+            }
+        }
+
         #[unsafe(method(hudClose:))]
         fn hud_close(&self, _sender: &AnyObject) {
             hide();
@@ -385,21 +396,30 @@ fn build(mtm: MainThreadMarker, rect: Rect) -> Hud {
         NSRect::new(NSPoint::new(12.0, 7.0), NSSize::new(150.0, 20.0)),
     );
     bar_view.addSubview(&bar_label);
+    // 同一个选区框，既能录也能截。
+    let bar_shot = make_button(
+        mtm,
+        "截屏",
+        NSRect::new(NSPoint::new(148.0, 6.0), NSSize::new(64.0, 22.0)),
+        sel!(hudShot:),
+    );
+    bar_view.addSubview(&bar_shot);
     let bar_button = make_button(
         mtm,
         "开始录制",
-        NSRect::new(NSPoint::new(164.0, 6.0), NSSize::new(88.0, 22.0)),
+        NSRect::new(NSPoint::new(218.0, 6.0), NSSize::new(104.0, 22.0)),
         sel!(hudToggle:),
     );
     bar_view.addSubview(&bar_button);
     let bar_close = make_button(
         mtm,
         "关闭",
-        NSRect::new(NSPoint::new(258.0, 6.0), NSSize::new(54.0, 22.0)),
+        NSRect::new(NSPoint::new(328.0, 6.0), NSSize::new(56.0, 22.0)),
         sel!(hudClose:),
     );
     bar_view.addSubview(&bar_close);
     unsafe {
+        bar_shot.setTarget(Some(&*controller));
         bar_button.setTarget(Some(&*controller));
         bar_close.setTarget(Some(&*controller));
     }
@@ -425,6 +445,7 @@ fn build(mtm: MainThreadMarker, rect: Rect) -> Hud {
         frame_view,
         bar_win,
         bar_label,
+        bar_shot,
         bar_button,
         bar_close,
         handle_win,
@@ -453,6 +474,7 @@ fn refresh_controls(hud: &mut Hud) {
             "开始录制"
         }));
     hud.bar_close.setEnabled(!hud.recording);
+    hud.bar_shot.setEnabled(!hud.recording);
 }
 
 /// Moves/resizes the three windows to match the current region.
@@ -529,6 +551,18 @@ pub fn show(rect: Rect) {
             *guard = Some(hud);
         }
     }
+}
+
+/// 当前框选的区域（选区框还显示着才有），⇧⌘A 可以直接截它。
+pub fn current_rect() -> Option<Rect> {
+    peek(|h| {
+        if h.bar_win.isVisible() {
+            Some(h.rect)
+        } else {
+            None
+        }
+    })
+    .flatten()
 }
 
 /// Hides every HUD window without dropping it.

@@ -39,7 +39,7 @@ the desktop by default.
 | Save location | `~/Desktop` by default, change it with "Choose save location…" in the menu; persisted across restarts |
 | Encoding | HEVC hardware encoding, YUV420 sampling, adjustable quality / frame rate / resolution |
 | Output | MP4 (HEVC + AAC) named `iRec-YYYYMMDD-HHMMSS.mp4`, saved to `~/Desktop` |
-| Screenshots | `⇧⌘S` full screen, `⇧⌘A` region; saved as PNG (`iRec-shot-YYYYMMDD-HHMMSS.png`) and hung on the line |
+| Screenshots | `⇧⌘S` full screen; `⇧⌘A` the current selection (or pick one first); the region's control bar has a "Screenshot" button. Saved as PNG (`iRec-shot-YYYYMMDD-HHMMSS.png`) and hung on the line |
 | The line | Finished recordings hang from a clothesline under the menu bar: rest the pointer there to drop it, click a card to reveal it in Finder, drag it into an app or a folder, click the cross to take it off |
 
 ## Requirements
@@ -173,10 +173,11 @@ The status line at the bottom shows `Ready`, `● Recording 00:12`, `Saving…`,
 
 1. Press `⇧⌘E` or click "Select region", then drag out the target area (any key cancels).
 2. On mouse-up the **selection frame stays on screen**, with a control bar above it:
-   `width × height · timer`, `Start recording`, `Close`.
+   `width × height · timer`, `Screenshot`, `Start recording`, `Close`.
 3. Drag the control bar to move the region; drag the round grip at the bottom-right to resize it.
 4. Click `Start recording` on the bar: the frame turns red, the timer runs, and the button
-   becomes `Stop recording`.
+   becomes `Stop recording`. Click `Screenshot` instead to capture that area as a PNG — the
+   frame stays put, so the same region can be recorded and captured in turn.
 5. Click `Stop recording` to finish. The frame remains in place so the same region can be
    recorded again immediately.
 

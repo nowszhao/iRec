@@ -605,6 +605,13 @@ impl AppDelegate {
         self.ivars().stop_menu_item.set(stop).ok();
 
         menu.addItem(&NSMenuItem::separatorItem(mtm));
+        let shot_full = menu_item(mtm, "截取全屏      ⇧⌘S", Some(sel!(shotFull:)), self, 0);
+        menu.addItem(&shot_full);
+
+        let shot_region = menu_item(mtm, "截取选区      ⇧⌘A", Some(sel!(shotRegion:)), self, 0);
+        menu.addItem(&shot_region);
+
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
 
         let audio_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("声音"));
         for (index, source) in AudioSource::all().iter().enumerate() {
@@ -787,10 +794,14 @@ impl AppDelegate {
             Action::ShotFull => {
                 self.screenshot(None);
             }
-            Action::PickShot => {
-                hud::hide();
-                pick_region(self.mtm(), true);
-            }
+            Action::PickShot => match hud::current_rect() {
+                // 选区框还在屏幕上：直接截它，不用再框一次。
+                Some(rect) => self.screenshot(Some(rect)),
+                None => {
+                    hud::hide();
+                    pick_region(self.mtm(), true);
+                }
+            },
             Action::ShotRegion(rect) => {
                 self.screenshot(Some(rect));
             }

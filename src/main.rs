@@ -636,7 +636,8 @@ impl AppDelegate {
         alert.setAlertStyle(NSWarningAlertStyle);
         alert.setMessageText(&NSString::from_str("需要“屏幕录制”权限"));
         alert.setInformativeText(&NSString::from_str(
-            "请在 系统设置 → 隐私与安全性 → 屏幕录制 中勾选 iRec，然后重新录制。",
+            "请在 系统设置 → 隐私与安全性 → 屏幕录制 中勾选 iRec，\
+             然后完全退出并重新打开 iRec（macOS 授权后要重启应用才生效）。",
         ));
         alert.addButtonWithTitle(&NSString::from_str("打开系统设置"));
         alert.addButtonWithTitle(&NSString::from_str("好"));

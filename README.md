@@ -53,8 +53,9 @@ cd iRec
 cargo build --release               # 仅编译二进制（target/release/iRec）
 ```
 
-打包脚本默认做 ad-hoc 签名；如需固定证书（重新编译后仍保留系统已授予的录制权限），
-指定签名身份：
+打包脚本默认做 ad-hoc 签名——**每次重建都会生成新的代码身份，系统会当成新 app，录制
+权限要重新授权一次**。固定用开发者证书签名就不会失效（TeamIdentifier 稳定），装好后
+授权一次即可：
 
 ```sh
 SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build_app.sh
@@ -168,7 +169,8 @@ iRec 是菜单栏应用：启动后**静默常驻**，不显示 Dock 图标，�
 4. 临时兜底：终端执行 `/Applications/iRec.app/Contents/MacOS/iRec &`
    （终端已获授权时可直接录制，窗口与快捷键同样可用）。
 
-签名变更或 bundle id 变更（`com.nows.irec`）后，系统会把它当成新应用，需要重新授权一次。
+签名变更或 bundle id 变更（`com.nows.irec`）后，系统会把它当成新应用，需要重新授权一次；
+另外 macOS 在授权之后**必须完全退出再重新打开 iRec** 才会生效，只关窗口不算退出。
 麦克风同理：系统设置 → 隐私与安全性 → 麦克风，允许 iRec 后重启一次。
 
 ## 命令行自测

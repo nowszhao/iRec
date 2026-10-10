@@ -54,8 +54,9 @@ cd iRec
 cargo build --release               # binary only (target/release/iRec)
 ```
 
-The script signs ad-hoc by default. To keep the system-granted recording permission
-across rebuilds, sign with a stable identity:
+The script signs ad-hoc by default — **every rebuild produces a new code identity, so macOS
+treats it as a new app and the recording permission has to be granted again**. Signing with a
+stable developer certificate (fixed TeamIdentifier) avoids that; grant it once after install:
 
 ```sh
 SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build_app.sh
@@ -181,7 +182,8 @@ If it still reports no permission:
    already has permission, recording works with window and hotkeys intact.
 
 Changing the signature or the bundle identifier (`com.nows.irec`) makes macOS treat the app
-as new, so permission has to be granted once again. The same applies to the microphone:
+as new, so permission has to be granted once again. Also, macOS only applies a grant after
+iRec is **fully quit and relaunched** — closing the window is not enough. The same applies to the microphone:
 System Settings → Privacy & Security → Microphone, allow iRec and relaunch.
 
 ## Headless self-test

@@ -1,23 +1,56 @@
 #!/bin/sh
-# Builds iRec.app into target/release (release binary + app bundle).
-# Pass a directory as $1 to build somewhere else, e.g. ./scripts/build_app.sh /tmp
+# Builds iRec.app (release binary + app bundle).
 #
-# Signs with a stable "Apple Development" identity when one is available, so
-# macOS keeps remembering the screen recording permission between rebuilds.
-# Falls back to an ad-hoc signature otherwise.
+#   ./scripts/build_app.sh [output_dir]        # host architecture
+#   ARCH=arm64    ./scripts/build_app.sh       # Apple Silicon
+#   ARCH=x86_64   ./scripts/build_app.sh       # Intel (cross-compiled)
+#   ARCH=universal ./scripts/build_app.sh      # both, merged with lipo
+#
+# Signs with the identity given in SIGN_IDENTITY when it is set (keeps the
+# system-granted recording permission across rebuilds), ad-hoc otherwise.
 set -e
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
-cargo build --release
-
+HOST_ARCH="$(uname -m)"
+ARCH="${ARCH:-$HOST_ARCH}"
 OUT="${1:-target/release}"
+
+case "$ARCH" in
+  arm64) TARGET=aarch64-apple-darwin ;;
+  x86_64) TARGET=x86_64-apple-darwin ;;
+  universal) TARGET=universal ;;
+  *)
+    echo "unknown ARCH=$ARCH (use arm64, x86_64 or universal)" >&2
+    exit 1
+    ;;
+esac
+
+build_target() {
+  rustup target add "$1" >/dev/null 2>&1 || true
+  cargo build --release --target "$1"
+}
+
+if [ "$TARGET" = "universal" ]; then
+  build_target aarch64-apple-darwin
+  build_target x86_64-apple-darwin
+  mkdir -p target/universal/release
+  lipo -create \
+    target/aarch64-apple-darwin/release/iRec \
+    target/x86_64-apple-darwin/release/iRec \
+    -output target/universal/release/iRec
+  BIN=target/universal/release/iRec
+else
+  build_target "$TARGET"
+  BIN="target/$TARGET/release/iRec"
+fi
+
 APP="$OUT/iRec.app"
 # Replace any previous copy: `cp -R` would otherwise nest the new bundle inside
 # the old one and the stale app keeps running.
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/iRec "$APP/Contents/MacOS/iRec"
+cp "$BIN" "$APP/Contents/MacOS/iRec"
 cp resources/Info.plist "$APP/Contents/Info.plist"
 cp resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 chmod +x "$APP/Contents/MacOS/iRec"
@@ -34,4 +67,4 @@ else
   echo "signed ad-hoc"
 fi
 
-echo "built: $(cd "$OUT" && pwd)/iRec.app"
+echo "built ($ARCH): $(cd "$OUT" && pwd)/iRec.app"

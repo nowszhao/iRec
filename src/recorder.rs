@@ -82,8 +82,8 @@ pub struct RecorderState {
     audio_in: Option<Retained<AVAssetWriterInput>>,
     settings: Settings,
     crop: Crop,
-    /// 待混音的麦克风采样（48 kHz 立体声交错），按到达顺序消费。
-    mic_queue: Vec<f32>,
+    /// 麦克风采样队列（AVAudioEngine 采集，48 kHz 立体声交错）。
+    mic_queue: Option<crate::mic::Queue>,
     mic_unsupported_logged: bool,
     /// 已收到麦克风采样；未收到时用于提示用户检查权限与输入设备。
     mic_started_at: Option<std::time::Instant>,
@@ -195,8 +195,9 @@ impl Recorder {
             cfg.setQueueDepth(6);
             cfg.setShowsCursor(settings.show_cursor);
             // 系统声音采集同时充当混音载体：仅录麦克风时其采样会被静音覆盖。
+            // 系统声音由 SCStream 提供；麦克风改由 AVAudioEngine 采集（见 mic 模块）。
             cfg.setCapturesAudio(settings.audio.any());
-            cfg.setCaptureMicrophone(settings.audio.wants_mic());
+            cfg.setCaptureMicrophone(false);
             cfg.setSampleRate(48_000);
             cfg.setChannelCount(2);
             cfg.setExcludesCurrentProcessAudio(true);
@@ -237,6 +238,12 @@ impl Recorder {
             SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &cfg, None)
         };
 
+        let mic_queue = if settings.audio.wants_mic() {
+            Some(crate::mic::start()?)
+        } else {
+            None
+        };
+
         let shared: Shared = Arc::new(Mutex::new(RecorderState {
             writer: writer.clone(),
             video_in: None,
@@ -244,7 +251,7 @@ impl Recorder {
             audio_in: audio_in.clone(),
             settings: settings.clone(),
             crop,
-            mic_queue: Vec::new(),
+            mic_queue: mic_queue.clone(),
             mic_unsupported_logged: false,
             mic_started_at: None,
             mic_wait_buffers: 0,
@@ -281,15 +288,6 @@ impl Recorder {
                     .addStreamOutput_type_sampleHandlerQueue_error(
                         ProtocolObject::from_ref(&*handler),
                         SCStreamOutputType::Audio,
-                        Some(&queue),
-                    )
-                    .map_err(|e| e.to_string())?;
-            }
-            if settings.audio.wants_mic() {
-                stream
-                    .addStreamOutput_type_sampleHandlerQueue_error(
-                        ProtocolObject::from_ref(&*handler),
-                        SCStreamOutputType::Microphone,
                         Some(&queue),
                     )
                     .map_err(|e| e.to_string())?;
@@ -350,6 +348,7 @@ impl Recorder {
         });
         unsafe { self.stream.stopCaptureWithCompletionHandler(Some(&block)) };
         wait_for(&done, 10.0, "stopCapture");
+        crate::mic::stop();
         let stop_error = error.lock().ok().and_then(|g| g.clone());
 
         {
@@ -524,42 +523,6 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
                 }
             }
         }
-    } else if r#type.0 == SCStreamOutputType::Microphone.0 {
-        // 麦克风：先排队，等系统声音的采样到达时一起混音。
-        audio::log_format(buffer, "mic");
-        let mic_pts = unsafe {
-            objc2_core_media::CMTimeGetSeconds(buffer.presentation_time_stamp())
-        };
-        let raw_frames = unsafe { buffer.num_samples() } as u32;
-        // 真实采样率 = 原始帧数 / 墙上时钟，既不依赖 ASBD 声明值，也不受 PTS
-        // 时间基准影响（麦克风和系统声音的 PTS 未必同源）。
-        let t0 = *state.mic_t0.get_or_insert_with(std::time::Instant::now);
-        state.mic_frames_seen += raw_frames;
-        let elapsed = t0.elapsed().as_secs_f64();
-        if elapsed >= 0.5 {
-            let measured = (state.mic_frames_seen as f64 / elapsed).round() as u32;
-            audio::set_measured_mic_rate(measured);
-            if !state.mic_rate_logged && elapsed >= 1.5 {
-                state.mic_rate_logged = true;
-                log(&format!(
-                    "mic: measured rate={} Hz over {:.1}s (raw frames/s, asbd says different)",
-                    measured, elapsed
-                ));
-            }
-        }
-        if let Some((pcm, peak)) = audio::extract_canonical(buffer) {
-            state.mic_started_at = Some(std::time::Instant::now());
-            state.mic_peak = state.mic_peak.max(peak);
-            if state.mic_queue_pts.is_none() {
-                state.mic_queue_pts = Some(mic_pts);
-            }
-            let room = audio::MAX_QUEUED_FRAMES.saturating_sub(state.mic_queue.len());
-            let take = pcm.len().min(room);
-            state.mic_queue.extend_from_slice(&pcm[..take]);
-        } else if !state.mic_unsupported_logged {
-            state.mic_unsupported_logged = true;
-            log("mic sample skipped: unsupported buffer format");
-        }
     } else if state.session_started {
         if r#type.0 == SCStreamOutputType::Audio.0 {
             audio::log_format(buffer, "system");
@@ -574,10 +537,16 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
         }
         if state.settings.audio.wants_mic() {
             let replace = state.settings.audio == AudioSource::Mic;
-            if state.mic_queue.is_empty() {
-                state.mic_underruns += 1;
+            let queue = state.mic_queue.clone();
+            if let Some(queue) = queue {
+                let Ok(mut mic) = queue.lock() else { return };
+                if mic.is_empty() {
+                    state.mic_underruns += 1;
+                }
+                if let Some(peak) = audio::write_into(buffer, &mut mic, replace) {
+                    state.mic_peak = state.mic_peak.max(peak);
+                }
             }
-            audio::write_into(buffer, &mut state.mic_queue, replace);
         }
         if let Some(audio_in) = &state.audio_in {
             if unsafe { audio_in.isReadyForMoreMediaData() } {

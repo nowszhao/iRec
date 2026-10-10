@@ -275,18 +275,18 @@ pub fn buffer_frames(buffer: &CMSampleBuffer) -> Option<usize> {
 
 /// 把排队的麦克风采样（48 kHz 立体声交错）写进系统声音的采样缓冲，
 /// 按帧数 1:1 消耗队列，并做增益与软限幅。`replace` 为 true 时先静音原内容。
-pub fn write_into(buffer: &CMSampleBuffer, mic: &mut Vec<f32>, replace: bool) -> bool {
+pub fn write_into(buffer: &CMSampleBuffer, mic: &mut Vec<f32>, replace: bool) -> Option<f32> {
     if mic.is_empty() && !replace {
-        return false;
+        return None;
     }
-    let Some(fmt) = format_of(buffer) else { return false };
+    let Some(fmt) = format_of(buffer) else { return None };
     if sample_size(&fmt).is_none() {
-        return false;
+        return None;
     }
-    let Some(raw) = raw_buffers(buffer, fmt.channels) else { return false };
-    let Some(frames) = frame_count(&fmt, &raw) else { return false };
+    let Some(raw) = raw_buffers(buffer, fmt.channels) else { return None };
+    let Some(frames) = frame_count(&fmt, &raw) else { return None };
     if frames == 0 {
-        return false;
+        return None;
     }
     let channels = if raw.interleaved { fmt.channels } else { raw.ptrs.len() };
     let step = RATE / fmt.rate.max(1.0);
@@ -316,6 +316,7 @@ pub fn write_into(buffer: &CMSampleBuffer, mic: &mut Vec<f32>, replace: bool) ->
     // 按这段缓冲消耗的帧数推进队列（两路都是 48 kHz 时就是 1:1）。
     let consumed = ((frames as f64 * step).round() as usize) * CHANNELS;
     let take = consumed.min(mic.len());
+    let peak = mic[..take].iter().fold(0.0f32, |m, v| m.max(v.abs()));
     mic.drain(..take);
-    true
+    Some(peak)
 }

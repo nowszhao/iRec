@@ -2,6 +2,7 @@ mod audio;
 mod frame;
 mod hotkey;
 mod hud;
+mod mic;
 mod overlay;
 mod recorder;
 mod state;

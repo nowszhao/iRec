@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use block2::RcBlock;
@@ -84,6 +85,11 @@ pub struct RecorderState {
     crop: Crop,
     /// 麦克风采样队列（AVAudioEngine 采集，48 kHz 立体声交错）。
     mic_queue: Option<crate::mic::Queue>,
+    /// 麦克风独立音轨的输入。
+    mic_in: Option<Retained<AVAssetWriterInput>>,
+    /// 会话起点（秒），麦克风采样按自己的帧数从这点往后排。
+    session_start_secs: Option<f64>,
+    mic_frames_written: u64,
     mic_unsupported_logged: bool,
     /// 已收到麦克风采样；未收到时用于提示用户检查权限与输入设备。
     mic_started_at: Option<std::time::Instant>,
@@ -118,6 +124,44 @@ pub struct Recorder {
     _queue: dispatch2::DispatchRetained<DispatchQueue>,
     shared: Shared,
     path: PathBuf,
+    /// 置位后麦克风泵线程退出。
+    pump_stop: Arc<AtomicBool>,
+    pump: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+/// 把麦克风 PCM 按自己的采样时钟写进独立音轨。
+fn mic_pump(state: Shared, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(8));
+        let (queue, mic_in, start_secs) = match state.lock() {
+            Ok(s) => (s.mic_queue.clone(), s.mic_in.clone(), s.session_start_secs),
+            Err(_) => continue,
+        };
+        let Some(input) = mic_in else { continue };
+        let Some(start) = start_secs else { continue };
+        let Some(queue) = queue else { continue };
+
+        let mut chunk: Vec<f32> = Vec::new();
+        if let Ok(mut q) = queue.lock() {
+            let take = (2048 * audio::CHANNELS).min(q.len());
+            chunk.extend(q.drain(..take));
+        }
+        if chunk.is_empty() {
+            continue;
+        }
+        let Ok(mut s) = state.lock() else { continue };
+        if !unsafe { input.isReadyForMoreMediaData() } {
+            continue;
+        }
+        let pts = start + s.mic_frames_written as f64 / audio::RATE;
+        s.mic_frames_written += (chunk.len() / audio::CHANNELS) as u64;
+        s.mic_peak = s
+            .mic_peak
+            .max(chunk.iter().fold(0.0f32, |m, v| m.max(v.abs())));
+        if let Some(buf) = audio::make_pcm_buffer(&chunk, pts) {
+            let _ = unsafe { input.appendSampleBuffer(&buf) };
+        }
+    }
 }
 
 // SAFETY: see `RecorderState`.
@@ -195,8 +239,8 @@ impl Recorder {
             cfg.setQueueDepth(6);
             cfg.setShowsCursor(settings.show_cursor);
             // 系统声音采集同时充当混音载体：仅录麦克风时其采样会被静音覆盖。
-            // 系统声音由 SCStream 提供；麦克风改由 AVAudioEngine 采集（见 mic 模块）。
-            cfg.setCapturesAudio(settings.audio.any());
+            // 系统声音由 SCStream 提供；麦克风由 AVAudioEngine 采集并写独立音轨（mic 模块）。
+            cfg.setCapturesAudio(settings.audio.wants_system());
             cfg.setCaptureMicrophone(false);
             cfg.setSampleRate(48_000);
             cfg.setChannelCount(2);
@@ -209,6 +253,11 @@ impl Recorder {
         let url =
             NSURL::fileURLWithPath_isDirectory(&NSString::from_str(path.to_str().unwrap()), false);
         let (writer, audio_in) = make_writer(&url, settings)?;
+        let mic_in = if settings.audio.wants_mic() {
+            make_audio_input(&writer, settings)
+        } else {
+            None
+        };
         crate::state::log(&format!(
             "start: capture {capture_w}x{capture_h} crop {:?} fps {} bpp {} audio {:?}",
             crop, settings.fps, settings.quality.bpp(), settings.audio
@@ -249,9 +298,12 @@ impl Recorder {
             video_in: None,
             frame_writer: None,
             audio_in: audio_in.clone(),
+            mic_in: mic_in.clone(),
             settings: settings.clone(),
             crop,
             mic_queue: mic_queue.clone(),
+            session_start_secs: None,
+            mic_frames_written: 0,
             mic_unsupported_logged: false,
             mic_started_at: None,
             mic_wait_buffers: 0,
@@ -283,7 +335,7 @@ impl Recorder {
                     Some(&queue),
                 )
                 .map_err(|e| e.to_string())?;
-            if settings.audio.any() {
+            if settings.audio.wants_system() {
                 stream
                     .addStreamOutput_type_sampleHandlerQueue_error(
                         ProtocolObject::from_ref(&*handler),
@@ -310,12 +362,23 @@ impl Recorder {
             }
         }
 
+        let pump_stop = Arc::new(AtomicBool::new(false));
+        let pump = if settings.audio.wants_mic() {
+            let state = shared.clone();
+            let flag = pump_stop.clone();
+            Some(std::thread::spawn(move || mic_pump(state, flag)))
+        } else {
+            None
+        };
+
         Ok(Self {
             stream,
             _output: handler,
             _queue: queue,
             shared,
             path,
+            pump_stop,
+            pump: Mutex::new(pump),
         })
     }
 
@@ -348,6 +411,12 @@ impl Recorder {
         });
         unsafe { self.stream.stopCaptureWithCompletionHandler(Some(&block)) };
         wait_for(&done, 10.0, "stopCapture");
+        self.pump_stop.store(true, Ordering::SeqCst);
+        if let Ok(mut guard) = self.pump.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
         crate::mic::stop();
         let stop_error = error.lock().ok().and_then(|g| g.clone());
 
@@ -366,6 +435,9 @@ impl Recorder {
 
         if let Some(audio_in) = &state.audio_in {
             unsafe { audio_in.markAsFinished() };
+        }
+        if let Some(mic_in) = &state.mic_in {
+            unsafe { mic_in.markAsFinished() };
         }
         if let Some(video_in) = &state.video_in {
             unsafe { video_in.markAsFinished() };
@@ -488,6 +560,9 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
         if !state.session_started {
             unsafe { state.writer.startSessionAtSourceTime(pts) };
             state.session_started = true;
+            state.session_start_secs = Some(unsafe {
+                objc2_core_media::CMTimeGetSeconds(pts)
+            });
         }
 
         let ready = state
@@ -535,19 +610,6 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
                 log("麦克风未收到采样：请检查 系统设置 → 隐私与安全性 → 麦克风 是否已允许，以及输入设备是否有信号");
             }
         }
-        if state.settings.audio.wants_mic() {
-            let replace = state.settings.audio == AudioSource::Mic;
-            let queue = state.mic_queue.clone();
-            if let Some(queue) = queue {
-                let Ok(mut mic) = queue.lock() else { return };
-                if mic.is_empty() {
-                    state.mic_underruns += 1;
-                }
-                if let Some(peak) = audio::write_into(buffer, &mut mic, replace) {
-                    state.mic_peak = state.mic_peak.max(peak);
-                }
-            }
-        }
         if let Some(audio_in) = &state.audio_in {
             if unsafe { audio_in.isReadyForMoreMediaData() } {
                 let _ = unsafe { audio_in.appendSampleBuffer(buffer) };
@@ -589,11 +651,34 @@ fn frame_status(buffer: &CMSampleBuffer) -> Option<i32> {
 
 /// Creates the writer and the (optional) audio input. The video input is added
 /// once the first frame arrives and its real size is known.
+/// 一条 AAC 48 kHz 立体声音轨（系统声音与麦克风各用一条）。
+fn make_audio_input(writer: &AVAssetWriter, settings: &Settings) -> Option<Retained<AVAssetWriterInput>> {
+    let audio_settings: Retained<SettingsDict> = NSMutableDictionary::new();
+    dict_set_number(&audio_settings, av_key!(AVFormatIDKey), AUDIO_FORMAT_AAC);
+    dict_set_number(&audio_settings, av_key!(AVSampleRateKey), 48_000.0);
+    dict_set_number(&audio_settings, av_key!(AVNumberOfChannelsKey), 2.0);
+    dict_set_number(&audio_settings, av_key!(AVEncoderBitRateKey), 128_000.0);
+    let input = unsafe {
+        AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
+            av_key!(AVMediaTypeAudio),
+            Some(&audio_settings),
+        )
+    };
+    unsafe { input.setExpectsMediaDataInRealTime(true) };
+    if unsafe { writer.canAddInput(&input) } {
+        unsafe { writer.addInput(&input) };
+        let _ = settings;
+        Some(input)
+    } else {
+        None
+    }
+}
+
 fn make_writer(
     url: &NSURL,
     settings: &Settings,
 ) -> Result<(Retained<AVAssetWriter>, Option<Retained<AVAssetWriterInput>>), String> {
-    let audio_in = if settings.audio.any() {
+    let audio_in = if settings.audio.wants_system() {
         let audio_settings: Retained<SettingsDict> = NSMutableDictionary::new();
         dict_set_number(&audio_settings, av_key!(AVFormatIDKey), AUDIO_FORMAT_AAC);
         dict_set_number(&audio_settings, av_key!(AVSampleRateKey), 48_000.0);

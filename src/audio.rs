@@ -7,7 +7,9 @@
 use objc2::rc::Retained;
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList, AudioStreamBasicDescription};
 use objc2_core_media::{
-    CMAudioFormatDescriptionGetStreamBasicDescription, CMBlockBuffer, CMSampleBuffer,
+    CMAudioFormatDescriptionCreate, CMAudioFormatDescriptionGetStreamBasicDescription,
+    CMBlockBuffer, CMBlockBufferCreateWithMemoryBlock, CMBlockBufferCustomBlockSource,
+    CMFormatDescription, CMSampleBuffer, CMSampleBufferCreateReady, CMSampleTimingInfo, CMTime,
 };
 
 /// 混音器内部格式：48 kHz 立体声 float，交错存放。
@@ -319,4 +321,119 @@ pub fn write_into(buffer: &CMSampleBuffer, mic: &mut Vec<f32>, replace: bool) ->
     let peak = mic[..take].iter().fold(0.0f32, |m, v| m.max(v.abs()));
     mic.drain(..take);
     Some(peak)
+}
+
+unsafe extern "C-unwind" fn free_block(
+    _ref_con: *mut std::ffi::c_void,
+    block: std::ptr::NonNull<std::ffi::c_void>,
+    _size: usize,
+) {
+    unsafe { libc::free(block.as_ptr() as *mut std::ffi::c_void) };
+}
+
+const K_CM_TIME_VALID: u32 = 1;
+
+/// 用 48 kHz 立体声交错的 float PCM 构造一个 CMSampleBuffer（麦克风独立音轨用）。
+pub fn make_pcm_buffer(pcm: &[f32], pts_seconds: f64) -> Option<Retained<CMSampleBuffer>> {
+    let frames = pcm.len() / CHANNELS;
+    if frames == 0 {
+        return None;
+    }
+    unsafe {
+        let bytes = pcm.len() * std::mem::size_of::<f32>();
+        let mem = libc::malloc(bytes);
+        if mem.is_null() {
+            return None;
+        }
+        std::ptr::copy_nonoverlapping(pcm.as_ptr() as *const u8, mem as *mut u8, bytes);
+
+        let source = CMBlockBufferCustomBlockSource {
+            version: 0,
+            AllocateBlock: None,
+            FreeBlock: Some(free_block),
+            refCon: std::ptr::null_mut(),
+        };
+        let mut block: *mut CMBlockBuffer = std::ptr::null_mut();
+        let status = CMBlockBufferCreateWithMemoryBlock(
+            None,
+            mem,
+            bytes,
+            None,
+            &source,
+            0,
+            bytes,
+            0,
+            std::ptr::NonNull::new(&mut block).unwrap(),
+        );
+        if status != 0 || block.is_null() {
+            libc::free(mem);
+            return None;
+        }
+
+        let asbd = AudioStreamBasicDescription {
+            mSampleRate: RATE,
+            mFormatID: FORMAT_LINEAR_PCM,
+            mFormatFlags: FLAG_FLOAT | FLAG_PACKED,
+            mBytesPerPacket: (CHANNELS * 4) as u32,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: (CHANNELS * 4) as u32,
+            mChannelsPerFrame: CHANNELS as u32,
+            mBitsPerChannel: 32,
+            mReserved: 0,
+        };
+        let mut desc: *const CMFormatDescription = std::ptr::null();
+        let status = CMAudioFormatDescriptionCreate(
+            None,
+            std::ptr::NonNull::from(&asbd),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            None,
+            std::ptr::NonNull::new(&mut desc).unwrap(),
+        );
+        if status != 0 || desc.is_null() {
+            let _ = Retained::from_raw(block);
+            return None;
+        }
+
+        let timing = CMSampleTimingInfo {
+            duration: CMTime {
+                value: 1,
+                timescale: RATE as i32,
+                flags: objc2_core_media::CMTimeFlags(K_CM_TIME_VALID),
+                epoch: 0,
+            },
+            presentationTimeStamp: CMTime {
+                value: (pts_seconds * RATE) as i64,
+                timescale: RATE as i32,
+                flags: objc2_core_media::CMTimeFlags(K_CM_TIME_VALID),
+                epoch: 0,
+            },
+            decodeTimeStamp: CMTime {
+                value: 0,
+                timescale: 0,
+                flags: objc2_core_media::CMTimeFlags(0),
+                epoch: 0,
+            },
+        };
+        let mut out: *mut CMSampleBuffer = std::ptr::null_mut();
+        let status = CMSampleBufferCreateReady(
+            None,
+            block.as_ref(),
+            desc.as_ref(),
+            frames as isize,
+            1,
+            &timing,
+            0,
+            std::ptr::null(),
+            std::ptr::NonNull::new(&mut out).unwrap(),
+        );
+        if status != 0 || out.is_null() {
+            let _ = Retained::from_raw(block);
+            let _ = Retained::from_raw(desc as *mut CMFormatDescription);
+            return None;
+        }
+        Some(Retained::from_raw(out).unwrap())
+    }
 }

@@ -154,7 +154,11 @@ Measured on a MacBook built-in display at 1728×1117, 30 fps, Balanced quality, 
 | System + microphone | Both PCM streams are converted to 48 kHz stereo and summed into one track |
 
 Selecting a microphone mode requests microphone access right away (macOS shows its prompt
-the first time). Microphone samples come from ScreenCaptureKit's
+the first time). Built-in microphones deliver a low level (measured peak around -54 dB), so
+the mic is boosted about +10 dB before mixing (`MIC_GAIN` in `src/audio.rs`; raise it if you
+need more). If no microphone sample arrives within two seconds, `~/Library/Logs/irec.log`
+records a "microphone received no samples" note — usually a missing permission or a silent
+input device. Microphone samples come from ScreenCaptureKit's
 `SCStreamOutputType::Microphone` in the device's native PCM format (measured: 48 kHz, mono,
 float32); `src/audio.rs` resamples them, expands them to stereo and mixes them into the
 system-audio sample buffers. In microphone-only mode the system samples are silenced before

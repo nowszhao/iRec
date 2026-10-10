@@ -85,6 +85,9 @@ pub struct RecorderState {
     /// 待混音的麦克风采样（48 kHz 立体声交错），按到达顺序消费。
     mic_queue: Vec<f32>,
     mic_unsupported_logged: bool,
+    /// 已收到麦克风采样；未收到时用于提示用户检查权限与输入设备。
+    mic_started_at: Option<std::time::Instant>,
+    mic_wait_buffers: u32,
     write_started: bool,
     session_started: bool,
     stopped: bool,
@@ -231,6 +234,8 @@ impl Recorder {
             crop,
             mic_queue: Vec::new(),
             mic_unsupported_logged: false,
+            mic_started_at: None,
+            mic_wait_buffers: 0,
             write_started: false,
             session_started: false,
             stopped: false,
@@ -497,6 +502,7 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
     } else if r#type.0 == SCStreamOutputType::Microphone.0 {
         // 麦克风：先排队，等系统声音的采样到达时一起混音。
         if let Some(pcm) = audio::extract_canonical(buffer) {
+            state.mic_started_at = Some(std::time::Instant::now());
             let room = audio::MAX_QUEUED_FRAMES.saturating_sub(state.mic_queue.len());
             let take = pcm.len().min(room);
             state.mic_queue.extend_from_slice(&pcm[..take]);
@@ -505,6 +511,14 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
             log("mic sample skipped: unsupported buffer format");
         }
     } else if state.session_started {
+        if state.settings.audio.wants_mic() && state.mic_started_at.is_none() {
+            // 麦克风迟迟没送来采样：多半是权限没给或输入设备没有信号。
+            state.mic_wait_buffers += 1;
+            if state.mic_wait_buffers == 60 && !state.mic_unsupported_logged {
+                state.mic_unsupported_logged = true;
+                log("麦克风未收到采样：请检查 系统设置 → 隐私与安全性 → 麦克风 是否已允许，以及输入设备是否有信号");
+            }
+        }
         if state.settings.audio.wants_mic() {
             let replace = state.settings.audio == AudioSource::Mic;
             audio::mix_into(buffer, &mut state.mic_queue, replace);

@@ -34,7 +34,7 @@ the desktop by default.
 | Quiet menu-bar app | On launch it only appears in the menu bar (no Dock icon, no window); every action lives in the status item menu |
 | State-aware controls | Stop is greyed out while idle; start/region are greyed out while recording |
 | Never recorded | The control window and the selection frame use `NSWindowSharingType::None`, so they never appear in the capture |
-| Audio | System audio by default (AAC 128 kbps), can be switched off |
+| Audio | Four modes: off / system audio / microphone / system + microphone (mixed into one track) |
 | Encoding | HEVC hardware encoding, YUV420 sampling, adjustable quality / frame rate / resolution |
 | Output | MP4 (HEVC + AAC) named `iRec-YYYYMMDD-HHMMSS.mp4`, saved to `~/Desktop` |
 
@@ -87,7 +87,7 @@ window without quitting.
 | Start recording (full screen) | Starts a capture; greyed out and labelled "Recording…" while active |
 | Select region | Enters the full-screen picker; greyed out while recording |
 | Stop recording | Enabled only while recording; greyed out otherwise |
-| Record system audio | System audio toggle (AAC 128 kbps) |
+| Audio | Off / system audio / microphone / system + microphone |
 | Quality / Frame rate / Resolution | Smaller · Balanced · High · Max / 30 · 60 fps / 1x · 2x |
 | Reveal in Finder | Selects the most recent recording in Finder |
 | Request / check permission | Triggers the system prompt and reports the result |
@@ -120,8 +120,8 @@ recording, and the control bar shows a hint for that.
 
 ### Menu bar & settings
 
-The menu offers, in order: start recording (full screen), select region, stop recording,
-system audio, quality (Smaller / Balanced / High / Max), frame rate (30 / 60), resolution
+The menu offers, in order: start recording (full screen), select record region, stop recording,
+audio (four-option submenu), quality (Smaller / Balanced / High / Max), frame rate (30 / 60), resolution
 (1x / 2x), reveal latest recording, open control window…, request / check permission, quit.
 "Stop recording" is enabled only while recording and greyed out otherwise. Menu items and
 window controls share the same settings.
@@ -144,6 +144,22 @@ Measured on a MacBook built-in display at 1728×1117, 30 fps, Balanced quality, 
 | 2x (default, high) | 3456×2234 | 3.49 MB | ≈ 21 MB |
 | 1x (space saving) | 1728×1116 | 0.96 MB | ≈ 5.8 MB |
 
+## Audio
+
+| Mode | Meaning |
+| --- | --- |
+| Off | Video only, no audio track |
+| System audio | What applications play |
+| Microphone | Microphone only |
+| System + microphone | Both PCM streams are converted to 48 kHz stereo and summed into one track |
+
+Selecting a microphone mode requests microphone access right away (macOS shows its prompt
+the first time). Microphone samples come from ScreenCaptureKit's
+`SCStreamOutputType::Microphone` in the device's native PCM format (measured: 48 kHz, mono,
+float32); `src/audio.rs` resamples them, expands them to stereo and mixes them into the
+system-audio sample buffers. In microphone-only mode the system samples are silenced before
+mixing.
+
 ## Permissions & troubleshooting
 
 Screen Recording permission is requested only when a capture actually starts: on macOS 15
@@ -161,7 +177,8 @@ If it still reports no permission:
    already has permission, recording works with window and hotkeys intact.
 
 Changing the signature or the bundle identifier (`com.nows.irec`) makes macOS treat the app
-as new, so permission has to be granted once again.
+as new, so permission has to be granted once again. The same applies to the microphone:
+System Settings → Privacy & Security → Microphone, allow iRec and relaunch.
 
 ## Headless self-test
 
@@ -171,9 +188,12 @@ Verify capture and muxing without the UI:
 cargo run --release -- --selftest --seconds 5                             # full screen
 cargo run --release -- --selftest --seconds 5 --region 200,300,900,600    # region (Cocoa coords, y from the bottom)
 cargo run --release -- --selftest --seconds 5 --no-audio --scale 1        # no audio, 1x
+cargo run --release -- --selftest --seconds 5 --audio mic                 # microphone only
+cargo run --release -- --selftest --seconds 5 --audio both                # system + microphone
 ```
 
-Options: `--seconds`, `--region x,y,w,h`, `--fps`, `--scale`, `--out <dir>`, `--no-audio`.
+Options: `--seconds`, `--region x,y,w,h`, `--fps`, `--scale`, `--out <dir>`,
+`--audio off|system|mic|both` (`--no-audio` equals `off`).
 Set `SCREEN_REC_DEBUG=1` for capture/encoding diagnostics on stderr.
 
 ## Architecture notes
@@ -185,6 +205,7 @@ Set `SCREEN_REC_DEBUG=1` for capture/encoding diagnostics on stderr.
 | `src/hotkey.rs` | Carbon `RegisterEventHotKey`; no Accessibility or Input Monitoring permission needed |
 | `src/overlay.rs` | Full-screen transparent `NSWindow` with a custom `NSView` for drag selection |
 | `src/hud.rs` | Persistent selection frame: outline window, control bar and resize grip working together |
+| `src/audio.rs` | PCM read-out, resampling and mixing (microphone into system audio) |
 | `src/state.rs` | Global settings and command queue (hotkeys, menu, picker all executed on the main-thread timer) |
 
 Region recording captures the whole display and crops while copying frames, rather than

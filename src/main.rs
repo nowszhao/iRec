@@ -1,3 +1,4 @@
+mod audio;
 mod frame;
 mod hotkey;
 mod hud;
@@ -8,6 +9,7 @@ mod state;
 use std::cell::{OnceCell, RefCell};
 use std::time::{Duration, Instant};
 
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::AnyThread;
@@ -19,6 +21,7 @@ use objc2_app_kit::{
     NSPopUpButton, NSStatusBar, NSStatusItem, NSTextField, NSWarningAlertStyle, NSWindow,
     NSWindowStyleMask, NSWorkspace,
 };
+use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint,
     NSRect, NSSize, NSString, NSURL,
@@ -27,13 +30,14 @@ use objc2_foundation::{
 use crate::overlay::pick_region;
 use crate::recorder::Recorder;
 use crate::state::{
-    init_state, log, push_action, with_state, Action, AppState, Quality, Rect, Settings, STATE,
+    init_state, log, push_action, with_state, Action, AppState, AudioSource, Quality, Rect,
+    Settings, STATE,
 };
 
 #[derive(Default)]
 struct AppIvars {
     status_item: OnceCell<Retained<NSStatusItem>>,
-    audio_item: OnceCell<Retained<NSMenuItem>>,
+    audio_items: RefCell<Vec<(usize, Retained<NSMenuItem>)>>,
     quality_items: RefCell<Vec<(usize, Retained<NSMenuItem>)>>,
     fps_items: RefCell<Vec<(i32, Retained<NSMenuItem>)>>,
     scale_items: RefCell<Vec<(i32, Retained<NSMenuItem>)>>,
@@ -41,7 +45,7 @@ struct AppIvars {
     status_line: OnceCell<Retained<NSMenuItem>>,
     window: OnceCell<Retained<NSWindow>>,
     status_label: OnceCell<Retained<NSTextField>>,
-    audio_button: OnceCell<Retained<NSButton>>,
+    audio_popup: OnceCell<Retained<NSPopUpButton>>,
     start_button: OnceCell<Retained<NSButton>>,
     region_button: OnceCell<Retained<NSButton>>,
     stop_button: OnceCell<Retained<NSButton>>,
@@ -129,9 +133,30 @@ define_class!(
             push_action(Action::Stop);
         }
 
-        #[unsafe(method(toggleAudio:))]
-        fn toggle_audio(&self, _sender: &AnyObject) {
-            with_state(|s| s.settings.audio = !s.settings.audio);
+        #[unsafe(method(setAudioSource:))]
+        fn set_audio_source(&self, sender: &AnyObject) {
+            let tag: i64 = unsafe { objc2::msg_send![sender, tag] };
+            let source = AudioSource::all()
+                .get(tag.max(0) as usize)
+                .copied()
+                .unwrap_or(AudioSource::System);
+            with_state(|s| s.settings.audio = source);
+            if source.wants_mic() {
+                request_mic_access();
+            }
+        }
+
+        #[unsafe(method(audioChanged:))]
+        fn audio_changed(&self, sender: &NSPopUpButton) {
+            let index = sender.indexOfSelectedItem().max(0) as usize;
+            let source = AudioSource::all()
+                .get(index)
+                .copied()
+                .unwrap_or(AudioSource::System);
+            with_state(|s| s.settings.audio = source);
+            if source.wants_mic() {
+                request_mic_access();
+            }
         }
 
         #[unsafe(method(setQuality:))]
@@ -334,17 +359,24 @@ impl AppDelegate {
         self.ivars().stop_button.set(stop).ok();
 
         y -= 40.0;
-        let audio = make_button(
+        let audio_label = make_label(
             mtm,
-            "录制系统声音",
-            sel!(toggleAudio:),
-            NSRect::new(NSPoint::new(20.0, y), NSSize::new(width - 40.0, 24.0)),
-            self,
+            "声音",
+            NSRect::new(NSPoint::new(20.0, y + 4.0), NSSize::new(50.0, 18.0)),
+            13.0,
         );
-        audio.setButtonType(NSButtonType::Switch);
-        audio.setState(NSControlStateValueOn);
+        content.addSubview(&audio_label);
+        let audio_titles: Vec<&str> = AudioSource::all().iter().map(|a| a.label()).collect();
+        let audio = make_popup(
+            mtm,
+            &audio_titles,
+            NSRect::new(NSPoint::new(90.0, y), NSSize::new(width - 110.0, 26.0)),
+            sel!(audioChanged:),
+            self,
+            1,
+        );
         content.addSubview(&audio);
-        self.ivars().audio_button.set(audio).ok();
+        self.ivars().audio_popup.set(audio).ok();
 
         y -= 44.0;
         let quality_label = make_label(
@@ -464,9 +496,21 @@ impl AppDelegate {
 
         menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-        let audio = menu_item(mtm, "录制声音（系统音频）", Some(sel!(toggleAudio:)), self, 0);
-        menu.addItem(&audio);
-        self.ivars().audio_item.set(audio).ok();
+        let audio_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("声音"));
+        for (index, source) in AudioSource::all().iter().enumerate() {
+            let item = menu_item(
+                mtm,
+                source.label(),
+                Some(sel!(setAudioSource:)),
+                self,
+                index as i64,
+            );
+            audio_menu.addItem(&item);
+            self.ivars().audio_items.borrow_mut().push((index, item));
+        }
+        let audio_root = menu_item(mtm, "声音", None, self, 0);
+        menu.addItem(&audio_root);
+        menu.setSubmenu_forItem(Some(&audio_menu), &audio_root);
 
         // 画质
         let quality_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("画质"));
@@ -672,12 +716,12 @@ impl AppDelegate {
         if let Some(field) = self.ivars().status_label.get() {
             field.setStringValue(&NSString::from_str(&label));
         }
-        if let Some(button) = self.ivars().audio_button.get() {
-            button.setState(if audio {
-                NSControlStateValueOn
-            } else {
-                NSControlStateValueOff
-            });
+        if let Some(popup) = self.ivars().audio_popup.get() {
+            let index = AudioSource::all()
+                .iter()
+                .position(|a| *a == audio)
+                .unwrap_or(1);
+            popup.selectItemAtIndex(index as isize);
         }
         if let Some(button) = self.ivars().start_button.get() {
             button.setTitle(&NSString::from_str(if stopping {
@@ -714,12 +758,9 @@ impl AppDelegate {
         if let Some(item) = self.ivars().stop_menu_item.get() {
             item.setEnabled(recording && !stopping);
         }
-        if let Some(item) = self.ivars().audio_item.get() {
-            item.setState(if settings.audio {
-                objc2_app_kit::NSControlStateValueOn
-            } else {
-                objc2_app_kit::NSControlStateValueOff
-            });
+        for (index, item) in self.ivars().audio_items.borrow().iter() {
+            let matches = AudioSource::all()[*index] == settings.audio;
+            item.setState(state_value(matches));
         }
         for (index, item) in self.ivars().quality_items.borrow().iter() {
             let matches = Quality::all()[*index] == settings.quality;
@@ -779,6 +820,19 @@ fn status_icon(mtm: MainThreadMarker, recording: bool) -> Retained<NSImage> {
     }
     image.unlockFocus();
     image
+}
+
+/// Asks for microphone access the first time a mic source is selected, so the
+/// system prompt appears without waiting for the next recording.
+fn request_mic_access() {
+    #[allow(deprecated)]
+    let media_type: Option<&objc2_foundation::NSString> = unsafe { AVMediaTypeAudio };
+    let Some(media_type) = media_type else { return };
+    let block: RcBlock<dyn Fn(objc2::runtime::Bool)> =
+        RcBlock::new(|granted: objc2::runtime::Bool| {
+        log(&format!("microphone access granted={}", granted.as_bool()));
+    });
+    unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &block) };
 }
 
 fn make_label(mtm: MainThreadMarker, text: &str, frame: NSRect, size: f64) -> Retained<NSTextField> {
@@ -993,7 +1047,15 @@ fn selftest(args: &[String]) {
 
     let mut settings = with_state(|s| s.settings.clone());
     if args.iter().any(|a| a == "--no-audio") {
-        settings.audio = false;
+        settings.audio = AudioSource::Off;
+    }
+    if let Some(name) = value(args, "--audio") {
+        settings.audio = match name.as_str() {
+            "off" | "none" => AudioSource::Off,
+            "mic" | "microphone" => AudioSource::Mic,
+            "both" => AudioSource::Both,
+            _ => AudioSource::System,
+        };
     }
     if let Some(fps) = value(args, "--fps").and_then(|v| v.parse().ok()) {
         settings.fps = fps;
@@ -1006,7 +1068,7 @@ fn selftest(args: &[String]) {
     }
 
     println!(
-        "irec selftest: {} audio, {} fps, {}x, region {:?}",
+        "irec selftest: {:?} audio, {} fps, {}x, region {:?}",
         settings.audio, settings.fps, settings.scale, region
     );
 

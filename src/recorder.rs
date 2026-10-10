@@ -40,8 +40,9 @@ macro_rules! av_key {
     }};
 }
 
+use crate::audio;
 use crate::frame::{Crop, FrameWriter};
-use crate::state::{log, Rect, Settings};
+use crate::state::{log, AudioSource, Rect, Settings};
 
 /// kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ('420v')
 const PIXEL_FORMAT_420V: u32 = 0x34323076;
@@ -81,6 +82,9 @@ pub struct RecorderState {
     audio_in: Option<Retained<AVAssetWriterInput>>,
     settings: Settings,
     crop: Crop,
+    /// 待混音的麦克风采样（48 kHz 立体声交错），按到达顺序消费。
+    mic_queue: Vec<f32>,
+    mic_unsupported_logged: bool,
     write_started: bool,
     session_started: bool,
     stopped: bool,
@@ -175,7 +179,9 @@ impl Recorder {
             cfg.setMinimumFrameInterval(objc2_core_media::CMTime::new(1, settings.fps));
             cfg.setQueueDepth(6);
             cfg.setShowsCursor(settings.show_cursor);
-            cfg.setCapturesAudio(settings.audio);
+            // 系统声音采集同时充当混音载体：仅录麦克风时其采样会被静音覆盖。
+            cfg.setCapturesAudio(settings.audio.any());
+            cfg.setCaptureMicrophone(settings.audio.wants_mic());
             cfg.setSampleRate(48_000);
             cfg.setChannelCount(2);
             cfg.setExcludesCurrentProcessAudio(true);
@@ -188,7 +194,7 @@ impl Recorder {
             NSURL::fileURLWithPath_isDirectory(&NSString::from_str(path.to_str().unwrap()), false);
         let (writer, audio_in) = make_writer(&url, settings)?;
         crate::state::log(&format!(
-            "start: capture {capture_w}x{capture_h} crop {:?} fps {} bpp {} audio {}",
+            "start: capture {capture_w}x{capture_h} crop {:?} fps {} bpp {} audio {:?}",
             crop, settings.fps, settings.quality.bpp(), settings.audio
         ));
         let _ = crop;
@@ -223,6 +229,8 @@ impl Recorder {
             audio_in: audio_in.clone(),
             settings: settings.clone(),
             crop,
+            mic_queue: Vec::new(),
+            mic_unsupported_logged: false,
             write_started: false,
             session_started: false,
             stopped: false,
@@ -244,11 +252,20 @@ impl Recorder {
                     Some(&queue),
                 )
                 .map_err(|e| e.to_string())?;
-            if settings.audio {
+            if settings.audio.any() {
                 stream
                     .addStreamOutput_type_sampleHandlerQueue_error(
                         ProtocolObject::from_ref(&*handler),
                         SCStreamOutputType::Audio,
+                        Some(&queue),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            if settings.audio.wants_mic() {
+                stream
+                    .addStreamOutput_type_sampleHandlerQueue_error(
+                        ProtocolObject::from_ref(&*handler),
+                        SCStreamOutputType::Microphone,
                         Some(&queue),
                     )
                     .map_err(|e| e.to_string())?;
@@ -477,7 +494,21 @@ fn handle_sample(buffer: &CMSampleBuffer, r#type: SCStreamOutputType) {
                 }
             }
         }
+    } else if r#type.0 == SCStreamOutputType::Microphone.0 {
+        // 麦克风：先排队，等系统声音的采样到达时一起混音。
+        if let Some(pcm) = audio::extract_canonical(buffer) {
+            let room = audio::MAX_QUEUED_FRAMES.saturating_sub(state.mic_queue.len());
+            let take = pcm.len().min(room);
+            state.mic_queue.extend_from_slice(&pcm[..take]);
+        } else if !state.mic_unsupported_logged {
+            state.mic_unsupported_logged = true;
+            log("mic sample skipped: unsupported buffer format");
+        }
     } else if state.session_started {
+        if state.settings.audio.wants_mic() {
+            let replace = state.settings.audio == AudioSource::Mic;
+            audio::mix_into(buffer, &mut state.mic_queue, replace);
+        }
         if let Some(audio_in) = &state.audio_in {
             if unsafe { audio_in.isReadyForMoreMediaData() } {
                 let _ = unsafe { audio_in.appendSampleBuffer(buffer) };
@@ -523,7 +554,7 @@ fn make_writer(
     url: &NSURL,
     settings: &Settings,
 ) -> Result<(Retained<AVAssetWriter>, Option<Retained<AVAssetWriterInput>>), String> {
-    let audio_in = if settings.audio {
+    let audio_in = if settings.audio.any() {
         let audio_settings: Retained<SettingsDict> = NSMutableDictionary::new();
         dict_set_number(&audio_settings, av_key!(AVFormatIDKey), AUDIO_FORMAT_AAC);
         dict_set_number(&audio_settings, av_key!(AVSampleRateKey), 48_000.0);

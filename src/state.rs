@@ -27,6 +27,50 @@ pub struct Rect {
     pub h: f64,
 }
 
+/// Where the recorded audio comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioSource {
+    Off,
+    System,
+    Mic,
+    Both,
+}
+
+impl AudioSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            AudioSource::Off => "关闭",
+            AudioSource::System => "系统声音",
+            AudioSource::Mic => "麦克风",
+            AudioSource::Both => "系统声音 + 麦克风",
+        }
+    }
+
+    pub fn all() -> [AudioSource; 4] {
+        [
+            AudioSource::Off,
+            AudioSource::System,
+            AudioSource::Mic,
+            AudioSource::Both,
+        ]
+    }
+
+    /// 是否要录系统声音。
+    pub fn wants_system(self) -> bool {
+        matches!(self, AudioSource::System | AudioSource::Both)
+    }
+
+    /// 是否要录麦克风。
+    pub fn wants_mic(self) -> bool {
+        matches!(self, AudioSource::Mic | AudioSource::Both)
+    }
+
+    /// 是否需要音轨（ScreenCaptureKit 的系统声音采集同时充当混音载体）。
+    pub fn any(self) -> bool {
+        !matches!(self, AudioSource::Off)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Quality {
     Small,
@@ -63,7 +107,7 @@ impl Quality {
 
 #[derive(Clone)]
 pub struct Settings {
-    pub audio: bool,
+    pub audio: AudioSource,
     pub fps: i32,
     /// 1.0 = point size, 2.0 = retina pixels.
     pub scale: f64,
@@ -75,7 +119,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            audio: true,
+            audio: AudioSource::System,
             fps: 30,
             scale: 2.0,
             quality: Quality::Balanced,

@@ -198,15 +198,19 @@ after a recording, stays tucked away while one is running, and is never recorded
 | Click a card | Reveal it in Finder |
 | Double click | Open it in the default player |
 | Drag into another app | It gets a copy, the card stays on the line |
-| Drag into a folder or the Desktop | The file stays there, the card leaves the line |
+| Drag into a folder, the Desktop or a dialog | The file stays there, the card stays on the line |
 | Drag onto the Dock's Trash | The file goes to the Trash, the card leaves the line |
 | Click the cross | Take it off the line (the file stays put) |
 | ⌥ + click the cross | Take it off and move the file to the Trash |
 
 What is dragged out is a real file: the file URL is handed to AppKit's dragging session and the
-destination decides what happens with it. Apps take a copy, Finder moves the file into the folder,
-and the Dock's Trash is followed up by iRec moving the file itself. Whenever the file is gone from
-its path, the next check (every 3 s) quietly takes the card off the line.
+destination decides what happens with it. Apps take a copy, Finder keeps the file in the folder,
+and the Dock's Trash is followed up by iRec moving the file itself.
+
+**A card only leaves the line in two cases**: clicking the cross (⌥ + click also sends the file to
+the Trash), or "Clear the line" in the menu. Dragging a recording into a folder or a dialog keeps
+it hanging, and so does the file being deleted by another app — clicking it then just says
+"file is no longer there".
 
 At most eight hang at a time; older ones fall off, or take everything down with "Clear the line"
 in the menu. Related items: Show / hide the line, Bring the line down when the pointer rests in
@@ -372,8 +376,9 @@ the recording.
 - Hotkeys are fixed to `⇧⌘R` / `⇧⌘E` (see `register_defaults` in `src/hotkey.rs`).
 - Adjusting the selection during a recording does not change the framing of the current video.
 - The line hangs on the screen under the pointer, and the peek after a recording happens there too.
-- The drop destination decides: dropping into a folder sometimes copies instead of moves, in which
-  case the original stays put and so does the card.
+- The drop destination decides: dropping into a folder may copy or move. If it moves, the card
+  still points at the old path and clicking it says "file is no longer there" — take it off with
+  the cross, or use "Clear the line".
 
 ## App icon
 

@@ -231,11 +231,6 @@ struct LineState {
     press: Option<(u64, bool, NSPoint)>,
     /// 正在被拖走的那张卡片。
     dragging: Option<u64>,
-    /// 拖完之后复查文件还在不在的时刻（Finder 的移动是异步收尾的）。
-    prune_at: Option<Instant>,
-    prune_checks: u8,
-    /// 下一次例行复查（文件被别的程序删掉也要下绳）。
-    next_prune: Instant,
     /// 小手光标是否已经设上（只在变化时改，别去抢别的应用的光标）。
     hand: bool,
     /// 窗口现在是否接收点击（只有指针压在卡片上时才收，其余时候点击穿过去）。
@@ -268,9 +263,6 @@ impl Default for LineState {
             panel_top: 0.0,
             press: None,
             dragging: None,
-            prune_at: None,
-            prune_checks: 0,
-            next_prune: Instant::now() + Duration::from_secs(3),
             hand: false,
             clickable: false,
         }
@@ -516,32 +508,6 @@ impl LineView {
         self.drain_pending();
         self.update_reveal(now);
         let over_card = self.update_hover();
-
-        // 拖进文件夹之后复查几次；平时每 3 秒查一次（文件可能被别的程序删掉）。
-        let do_prune = {
-            let mut st = self.ivars().state.borrow_mut();
-            if let Some(at) = st.prune_at {
-                if now >= at {
-                    st.prune_at = if st.prune_checks > 1 {
-                        st.prune_checks -= 1;
-                        Some(now + Duration::from_secs_f64(1.2))
-                    } else {
-                        None
-                    };
-                    true
-                } else {
-                    false
-                }
-            } else if now >= st.next_prune {
-                st.next_prune = now + Duration::from_secs_f64(3.0);
-                true
-            } else {
-                false
-            }
-        };
-        if do_prune {
-            self.prune();
-        }
 
         let mut st = self.ivars().state.borrow_mut();
         let width = st.width;
@@ -922,8 +888,9 @@ impl LineView {
         self.ivars().state.borrow_mut().dragging = Some(id);
     }
 
-    /// 拖放结束：拖到废纸篓要自己把文件挪过去；拖进文件夹后文件换了地方，
-    /// 卡片就该下绳（Finder 的移动是异步的，所以还要复查几次）。
+    /// 拖放结束。卡片只在手动取下或清空时才离开绳子，所以拖进文件夹、对话框
+    /// 之后它照样挂着——那是把文件送出去，不是丢掉。唯一例外是拖到 Dock 的
+    /// 废纸篓：那是明确要删，文件挪进废纸篓、卡片下绳。
     fn drag_ended(&self, operation: NSDragOperation) {
         let Some(id) = self.ivars().state.borrow_mut().dragging.take() else {
             return;
@@ -940,20 +907,15 @@ impl LineView {
                 self.take_off(index, true);
             }
         }
-        let mut st = self.ivars().state.borrow_mut();
-        st.prune_at = Some(Instant::now() + Duration::from_secs_f64(0.6));
-        st.prune_checks = 2;
-        drop(st);
-        self.prune();
     }
 
-    /// 文件不在原处了就悄悄下绳：拖进文件夹、或者被别的程序删掉，都算。
-    fn prune(&self) {
+    /// 卡片下面冒一句话，顺便让它轻轻晃一下。
+    fn note(&self, index: usize, text: &str) {
         let mut st = self.ivars().state.borrow_mut();
-        let dragging = st.dragging;
-        st.items.retain(|item| {
-            item.flying || (item.fall.is_none() && Some(item.id) != dragging && item.path.exists())
-        });
+        if let Some(item) = st.items.get_mut(index) {
+            item.bubble = Some((text.to_string(), Instant::now()));
+            nudge(&mut item.swing_v, 3.0);
+        }
     }
 
     /// 叉：从绳上取下（按住 ⌥ 连文件一起丢进废纸篓）。
@@ -982,18 +944,25 @@ impl LineView {
 
     fn open(&self, index: usize) {
         let path = self.path_at(index);
-        if let Some(path) = path {
-            let url = NSURL::fileURLWithPath_isDirectory(
-                &NSString::from_str(&path.to_string_lossy()),
-                false,
-            );
-            let _ = NSWorkspace::sharedWorkspace().openURL(&url);
+        let Some(path) = path else { return };
+        if !path.exists() {
+            self.note(index, "文件已不在原处");
+            return;
         }
+        let url = NSURL::fileURLWithPath_isDirectory(
+            &NSString::from_str(&path.to_string_lossy()),
+            false,
+        );
+        let _ = NSWorkspace::sharedWorkspace().openURL(&url);
     }
 
     fn reveal_in_finder(&self, index: usize) {
         let path = self.path_at(index);
         let Some(path) = path else { return };
+        if !path.exists() {
+            self.note(index, "文件已不在原处");
+            return;
+        }
         let url =
             NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&path.to_string_lossy()), false);
         NSWorkspace::sharedWorkspace()

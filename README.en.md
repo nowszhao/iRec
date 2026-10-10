@@ -1,0 +1,221 @@
+# iRec
+
+A menu-bar screen recorder for macOS, written in Rust. Full-screen or region capture
+with optional system audio, encoded as HEVC + AAC in an `.mp4` container and saved to
+the desktop by default.
+
+[简体中文](./README.md) | English
+
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Install & Build](#install--build)
+- [Usage](#usage)
+  - [Control window](#control-window)
+  - [Global hotkeys](#global-hotkeys)
+  - [Region recording](#region-recording)
+  - [Menu bar & settings](#menu-bar--settings)
+- [Output & measured size](#output--measured-size)
+- [Permissions & troubleshooting](#permissions--troubleshooting)
+- [Headless self-test](#headless-self-test)
+- [Architecture notes](#architecture-notes)
+- [Reliability](#reliability)
+- [Known limitations](#known-limitations)
+- [App icon](#app-icon)
+
+## Features
+
+| Capability | Details |
+| --- | --- |
+| One-key capture | `⇧⌘R` starts/stops full-screen recording; `⇧⌘E` opens the region picker and stops an ongoing recording |
+| Full screen / region | Region is drag-selected; press any key while selecting to cancel |
+| Persistent selection frame | The frame stays on screen after selection, can be dragged and resized, and hosts its own start/stop control bar |
+| State-aware controls | Stop is greyed out while idle; start/region are greyed out while recording |
+| Never recorded | The control window and the selection frame use `NSWindowSharingType::None`, so they never appear in the capture |
+| Audio | System audio by default (AAC 128 kbps), can be switched off |
+| Encoding | HEVC hardware encoding, YUV420 sampling, adjustable quality / frame rate / resolution |
+| Output | MP4 (HEVC + AAC) named `iRec-YYYYMMDD-HHMMSS.mp4`, saved to `~/Desktop` |
+
+## Requirements
+
+- macOS 13.0 or later (`LSMinimumSystemVersion = 13.0`)
+- Screen Recording permission (requested on first real capture — see [Permissions](#permissions--troubleshooting))
+- To build: a Rust toolchain (edition 2024) and Xcode command line tools
+
+## Install & Build
+
+```sh
+git clone ssh://git@ssh.github.com:443/nowszhao/iRec.git
+cd iRec
+
+./scripts/build_app.sh              # release build packaged as ../outputs/iRec.app
+cargo build --release               # binary only (target/release/iRec)
+```
+
+The script signs ad-hoc by default. To keep the system-granted recording permission
+across rebuilds, sign with a stable identity:
+
+```sh
+SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build_app.sh
+```
+
+Install into Applications:
+
+```sh
+cp -R ../outputs/iRec.app /Applications/
+```
+
+## Usage
+
+After launch there are three entry points: a Dock icon, the control window, and a menu
+bar item (hollow dot + `REC`; it turns red and shows `● 00:12` while recording, then
+briefly `✓ 12.3 MB` after finishing).
+
+### Control window
+
+| Control | Behaviour |
+| --- | --- |
+| Start recording (full screen) | Starts a capture; greyed out and labelled "Recording…" while active |
+| Select region | Enters the full-screen picker; greyed out while recording |
+| Stop recording | Enabled only while recording; greyed out otherwise |
+| Record system audio | System audio toggle (AAC 128 kbps) |
+| Quality / Frame rate / Resolution | Smaller · Balanced · High · Max / 30 · 60 fps / 1x · 2x |
+| Reveal in Finder | Selects the most recent recording in Finder |
+| Request / check permission | Triggers the system prompt and reports the result |
+
+The status line at the bottom shows `Ready`, `● Recording 00:12`, `Saving…`, or
+`Saved xxx (12.3 MB)`.
+
+### Global hotkeys
+
+| Hotkey | Action |
+| --- | --- |
+| `⇧⌘R` | Start / stop full-screen recording |
+| `⇧⌘E` | Open the region picker; press once more while recording to stop |
+| `⌘Q` | Quit (the current file is finalised first) |
+
+### Region recording
+
+1. Press `⇧⌘E` or click "Select region", then drag out the target area (any key cancels).
+2. On mouse-up the **selection frame stays on screen**, with a control bar above it:
+   `width × height · timer`, `Start recording`, `Close`.
+3. Drag the control bar to move the region; drag the round grip at the bottom-right to resize it.
+4. Click `Start recording` on the bar: the frame turns red, the timer runs, and the button
+   becomes `Stop recording`.
+5. Click `Stop recording` to finish. The frame remains in place so the same region can be
+   recorded again immediately.
+
+Moving or resizing during a recording does **not** change the captured area of the running
+recording (this avoids jumps in the video). The new region applies to the **next**
+recording, and the control bar shows a hint for that.
+
+### Menu bar & settings
+
+Quality (Smaller / Balanced / High / Max), frame rate (30 / 60), resolution (1x / 2x),
+system-audio toggle, reveal latest recording, quit. Menu items and window controls share
+the same settings.
+
+## Output & measured size
+
+| Item | Value |
+| --- | --- |
+| Container / codecs | MP4, HEVC video (hardware), AAC 128 kbps / 48 kHz stereo audio |
+| Sampling | YUV420 (`420v`, NV12) |
+| Defaults | Balanced quality, 30 fps, 2x (Retina pixels), system audio on |
+| Naming | `iRec-YYYYMMDD-HHMMSS.mp4`, with a numeric suffix on collision |
+| Location | `~/Desktop` (`Settings::out_dir`) |
+| Log | `~/Library/Logs/irec.log` |
+
+Measured on a MacBook built-in display at 1728×1117, 30 fps, Balanced quality, 10 s clip:
+
+| Resolution | Actual pixels | 10 s size | Per minute |
+| --- | --- | --- | --- |
+| 2x (default, high) | 3456×2234 | 3.49 MB | ≈ 21 MB |
+| 1x (space saving) | 1728×1116 | 0.96 MB | ≈ 5.8 MB |
+
+## Permissions & troubleshooting
+
+Screen Recording permission is requested only when a capture actually starts: on macOS 15
+`CGPreflightScreenCaptureAccess()` reports "not granted" incorrectly, so requesting at
+launch would make the system prompt again and again. Use "Request / check permission" in
+the control window at any time.
+
+If it still reports no permission:
+
+1. Quit iRec completely (⌘Q or the Quit button).
+2. System Settings → Privacy & Security → Screen Recording: toggle iRec off and on
+   (enable every entry if there are several; otherwise add `/Applications/iRec.app` with `+`).
+3. Relaunch iRec and click "Request / check permission" to see the verdict.
+4. Fallback: run `/Applications/iRec.app/Contents/MacOS/iRec &` in Terminal — if Terminal
+   already has permission, recording works with window and hotkeys intact.
+
+Changing the signature or the bundle identifier (`com.nows.irec`) makes macOS treat the app
+as new, so permission has to be granted once again.
+
+## Headless self-test
+
+Verify capture and muxing without the UI:
+
+```sh
+cargo run --release -- --selftest --seconds 5                             # full screen
+cargo run --release -- --selftest --seconds 5 --region 200,300,900,600    # region (Cocoa coords, y from the bottom)
+cargo run --release -- --selftest --seconds 5 --no-audio --scale 1        # no audio, 1x
+```
+
+Options: `--seconds`, `--region x,y,w,h`, `--fps`, `--scale`, `--out <dir>`, `--no-audio`.
+Set `SCREEN_REC_DEBUG=1` for capture/encoding diagnostics on stderr.
+
+## Architecture notes
+
+| Module | Responsibility |
+| --- | --- |
+| `src/recorder.rs` | ScreenCaptureKit capture + `AVAssetWriter` (HEVC/AAC) muxing |
+| `src/frame.rs` | Copies frames into an owned `CVPixelBufferPool` and crops to the region |
+| `src/hotkey.rs` | Carbon `RegisterEventHotKey`; no Accessibility or Input Monitoring permission needed |
+| `src/overlay.rs` | Full-screen transparent `NSWindow` with a custom `NSView` for drag selection |
+| `src/hud.rs` | Persistent selection frame: outline window, control bar and resize grip working together |
+| `src/state.rs` | Global settings and command queue (hotkeys, menu, picker all executed on the main-thread timer) |
+
+Region recording captures the whole display and crops while copying frames, rather than
+feeding ScreenCaptureKit sub-region frames straight into `AVAssetWriter`, which fails with
+`AVFoundationErrorDomain -11800` / `OSStatus -16122`.
+
+The selection frame and control window are marked `NSWindowSharingType::None`, and the
+capture filter additionally excludes this process' windows, so no UI element ends up in
+the recording.
+
+## Reliability
+
+- **Fragmented writing**: a movie fragment is flushed every 5 seconds. If the app is
+  force-quit or crashes, the file still contains moov plus written fragments and stays
+  playable instead of becoming an unopenable stub.
+- **Finalising off the main thread**: stopping waits for `AVAssetWriter` on a background
+  thread while the run loop keeps going, so the file always gets closed.
+- **Finalise on quit**: quitting or terminating writes out the file that is in progress.
+- **Fail fast on encoder errors**: an encoder error ends the recording immediately and
+  reports it, instead of continuing to write a broken file.
+
+## Known limitations
+
+- Only the main display is recorded.
+- System audio (what applications play) is captured; microphone input is not.
+- Hotkeys are fixed to `⇧⌘R` / `⇧⌘E` (see `register_defaults` in `src/hotkey.rs`).
+- Adjusting the selection during a recording does not change the framing of the current video.
+
+## App icon
+
+`resources/icon.svg` is the single source (dark squircle, screen panel, selection corners,
+red record dot). `resources/AppIcon.icns` is generated from it and bundled by
+`scripts/build_app.sh`. Regenerate with headless Chrome — `qlmanage` bakes in a white
+background:
+
+```sh
+mkdir -p /tmp/icon.iconset
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
+  --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+  --window-size=1024,1024 --default-background-color=00000000 \
+  --screenshot=/tmp/icon1024.png "file://$PWD/resources/icon.svg"
+# then produce the 10 iconset sizes with PIL / sips, and finally:
+iconutil -c icns /tmp/icon.iconset -o resources/AppIcon.icns
+```

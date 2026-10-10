@@ -31,6 +31,7 @@ the desktop by default.
 | One-key capture | `⇧⌘R` starts/stops full-screen recording; `⇧⌘E` opens the region picker and stops an ongoing recording |
 | Full screen / region | Region is drag-selected; press any key while selecting to cancel |
 | Persistent selection frame | The frame stays on screen after selection, can be dragged and resized, and hosts its own start/stop control bar |
+| Quiet menu-bar app | On launch it only appears in the menu bar (no Dock icon, no window); every action lives in the status item menu |
 | State-aware controls | Stop is greyed out while idle; start/region are greyed out while recording |
 | Never recorded | The control window and the selection frame use `NSWindowSharingType::None`, so they never appear in the capture |
 | Audio | System audio by default (AAC 128 kbps), can be switched off |
@@ -68,11 +69,18 @@ cp -R target/release/iRec.app /Applications/
 
 ## Usage
 
-After launch there are three entry points: a Dock icon, the control window, and a menu
-bar item (hollow dot + `REC`; it turns red and shows `● 00:12` while recording, then
-briefly `✓ 12.3 MB` after finishing).
+iRec is a menu-bar app: on launch it stays **quiet** — no Dock icon and no window.
+Click the menu bar item (hollow dot + `REC`; it turns red and shows `● 00:12` while
+recording, then briefly `✓ 12.3 MB` after finishing) to open the menu, which holds
+recording, quality, permission checks and quit. When you want the visual controls, pick
+"Open control window…" from the menu; closing that window only hides it and does not quit
+the app (use "Quit" in the menu for that).
 
 ### Control window
+
+Hidden by default — open it with "Open control window…" in the menu. Closing it hides the
+window without quitting.
+
 
 | Control | Behaviour |
 | --- | --- |
@@ -93,7 +101,7 @@ The status line at the bottom shows `Ready`, `● Recording 00:12`, `Saving…`,
 | --- | --- |
 | `⇧⌘R` | Start / stop full-screen recording |
 | `⇧⌘E` | Open the region picker; press once more while recording to stop |
-| `⌘Q` | Quit (the current file is finalised first) |
+| `⌘Q` | Quit when the control window is active (the current file is finalised first) |
 
 ### Region recording
 
@@ -112,9 +120,11 @@ recording, and the control bar shows a hint for that.
 
 ### Menu bar & settings
 
-Quality (Smaller / Balanced / High / Max), frame rate (30 / 60), resolution (1x / 2x),
-system-audio toggle, reveal latest recording, quit. Menu items and window controls share
-the same settings.
+The menu offers, in order: start recording (full screen), select region, stop recording,
+system audio, quality (Smaller / Balanced / High / Max), frame rate (30 / 60), resolution
+(1x / 2x), reveal latest recording, open control window…, request / check permission, quit.
+"Stop recording" is enabled only while recording and greyed out otherwise. Menu items and
+window controls share the same settings.
 
 ## Output & measured size
 

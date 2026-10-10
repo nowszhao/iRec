@@ -67,7 +67,7 @@ define_class!(
                 window.close();
             }
             NSApplication::sharedApplication(self.mtm())
-                .setActivationPolicy(NSApplicationActivationPolicy::Regular);
+                .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
             if let Some(rect) = picked {
                 if rect.w >= 16.0 && rect.h >= 16.0 {
                     // The frame stays on screen; recording starts from its bar.
@@ -82,7 +82,7 @@ define_class!(
                 window.close();
             }
             NSApplication::sharedApplication(self.mtm())
-                .setActivationPolicy(NSApplicationActivationPolicy::Regular);
+                .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         }
 
         #[unsafe(method(acceptsFirstResponder))]

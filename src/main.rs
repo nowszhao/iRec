@@ -69,7 +69,8 @@ define_class!(
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window_closed(&self, _sender: &NSApplication) -> bool {
-            true
+            // Menu-bar app: the window is optional, so closing it just hides it.
+            false
         }
 
         #[unsafe(method(applicationWillTerminate:))]
@@ -155,6 +156,14 @@ define_class!(
         fn set_scale(&self, sender: &AnyObject) {
             let tag: i64 = unsafe { objc2::msg_send![sender, tag] };
             with_state(|s| s.settings.scale = tag as f64 / 10.0);
+        }
+
+        #[unsafe(method(showWindow:))]
+        fn show_window(&self, _sender: &AnyObject) {
+            if let Some(window) = self.ivars().window.get() {
+                window.makeKeyAndOrderFront(None);
+                NSApplication::sharedApplication(self.mtm()).activateIgnoringOtherApps(true);
+            }
         }
 
         #[unsafe(method(checkPermission:))]
@@ -246,8 +255,8 @@ impl AppDelegate {
             with_state(|s| s.last_error = Some(format!("快捷键注册失败：{err}")));
         }
 
+        // Built but not shown: the app starts silently in the menu bar.
         let window = self.build_window(mtm);
-        window.makeKeyAndOrderFront(None);
         self.ivars().window.set(window).ok();
 
         let timer = unsafe {
@@ -509,6 +518,18 @@ impl AppDelegate {
 
         let reveal = menu_item(mtm, "在访达中显示最新录制", Some(sel!(revealLast:)), self, 0);
         menu.addItem(&reveal);
+
+        let open_window = menu_item(mtm, "打开控制窗口…", Some(sel!(showWindow:)), self, 0);
+        menu.addItem(&open_window);
+
+        let permission = menu_item(
+            mtm,
+            "申请 / 检查屏幕录制权限",
+            Some(sel!(checkPermission:)),
+            self,
+            0,
+        );
+        menu.addItem(&permission);
         self.ivars().last_file.set(reveal).ok();
 
         let status_line = menu_item(mtm, "就绪", None, self, 0);
@@ -929,16 +950,16 @@ fn main() {
 
     let mtm = MainThreadMarker::new().expect("irec must start on the main thread");
     let app = NSApplication::sharedApplication(mtm);
-    // A regular app: Dock icon + control window, so it is always visible and
-    // can be quit from the Dock / Cmd+Q / the window's close button.
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // Menu-bar app: no Dock icon and no window on launch. Everything is
+    // reachable from the status item menu (plus the two global hotkeys).
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
 
     let delegate = AppDelegate::new(mtm);
     unsafe { app.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
     app.setMainMenu(Some(&build_main_menu(mtm, &delegate)));
     delegate.setup(mtm);
-    println!("iRec: 已启动，点击菜单栏 REC 或使用 ⇧⌘R / ⇧⌘E");
+    println!("iRec: 已常驻菜单栏，点击 REC 图标操作，或使用 ⇧⌘R / ⇧⌘E");
 
     std::mem::forget(delegate);
     app.run();

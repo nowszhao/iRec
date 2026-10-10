@@ -264,21 +264,49 @@ pub fn extract_canonical(buffer: &CMSampleBuffer) -> Option<(Vec<f32>, f32)> {
     Some((out, peak))
 }
 
-/// 把排队的麦克风采样写回系统声音的采样缓冲。
-///
-/// `replace` 为 true 时先用静音覆盖系统声音（仅录麦克风模式）。
-/// 返回是否真的做了混音；格式不支持时会返回 false。
 static LOGGED_MIX_FORMAT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-pub fn mix_into(buffer: &CMSampleBuffer, mic: &mut Vec<f32>, replace: bool) -> bool {
-    if mic.is_empty() && !replace {
-        return false;
+/// 按时间轴对齐取一段麦克风采样。
+///
+/// `mic_start` 是队列头对应的时间（秒），`from` / `to` 是目标区间（秒）。
+/// 返回交叠部分的采样（不足的地方由调用方补零），并把队列头推进到 `to`。
+pub fn take_range(mic: &mut Vec<f32>, mic_start: &mut f64, from: f64, to: f64, frames: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; frames * CHANNELS];
+    if mic.is_empty() {
+        return out;
     }
+    let rate = RATE;
+    // 队列头晚于目标区间开头：丢弃迟到的部分
+    let skip = ((from - *mic_start) * rate).round() as isize;
+    if skip > 0 {
+        let skip = (skip as usize).min(mic.len() / CHANNELS);
+        mic.drain(..skip * CHANNELS);
+        *mic_start += skip as f64 / rate;
+    }
+    let start_offset = ((from - *mic_start) * rate).round();
+    let take = frames.min(mic.len() / CHANNELS);
+    if take > 0 {
+        out[..take * CHANNELS].copy_from_slice(&mic[..take * CHANNELS]);
+        mic.drain(..take * CHANNELS);
+        *mic_start += take as f64 / rate;
+    }
+    let _ = (to, start_offset);
+    out
+}
+
+/// 缓冲里有多少帧（每声道）。
+pub fn buffer_frames(buffer: &CMSampleBuffer) -> Option<usize> {
+    let fmt = format_of(buffer)?;
+    sample_size(&fmt)?;
+    let raw = raw_buffers(buffer, fmt.channels)?;
+    frame_count(&fmt, &raw)
+}
+
+/// 把 48 kHz 立体声交错的采样写进系统声音的采样缓冲（带增益与软限幅）。
+/// `replace` 为 true 时先用静音覆盖原内容（仅录麦克风模式）。
+pub fn write_into(buffer: &CMSampleBuffer, samples: &[f32], replace: bool) -> bool {
     let Some(fmt) = format_of(buffer) else { return false };
     if sample_size(&fmt).is_none() {
-        if !LOGGED_MIX_FORMAT.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            crate::state::log(&format!("mixer: unsupported audio format, mic dropped"));
-        }
         return false;
     }
     let Some(raw) = raw_buffers(buffer, fmt.channels) else { return false };
@@ -288,7 +316,7 @@ pub fn mix_into(buffer: &CMSampleBuffer, mic: &mut Vec<f32>, replace: bool) -> b
     }
     let channels = if raw.interleaved { fmt.channels } else { raw.ptrs.len() };
     let step = RATE / fmt.rate.max(1.0);
-    let available = mic.len() / CHANNELS;
+    let available = samples.len() / CHANNELS;
 
     for c in 0..channels {
         let ptr = raw.ptrs[if raw.interleaved { 0 } else { c }];
@@ -297,24 +325,19 @@ pub fn mix_into(buffer: &CMSampleBuffer, mic: &mut Vec<f32>, replace: bool) -> b
             let left = pos.floor() as usize;
             let mic_sample = if left + 1 < available {
                 let frac = (pos - left as f64) as f32;
-                let a = mic[left * CHANNELS + c.min(CHANNELS - 1)];
-                let b = mic[(left + 1) * CHANNELS + c.min(CHANNELS - 1)];
+                let a = samples[left * CHANNELS + c.min(CHANNELS - 1)];
+                let b = samples[(left + 1) * CHANNELS + c.min(CHANNELS - 1)];
                 a + (b - a) * frac
             } else {
-                mic.get(left * CHANNELS + c.min(CHANNELS - 1))
+                samples
+                    .get(left * CHANNELS + c.min(CHANNELS - 1))
                     .copied()
                     .unwrap_or(0.0)
             } * MIC_GAIN;
             let index = if raw.interleaved { i * fmt.channels + c } else { i };
             let current = if replace { 0.0 } else { read_sample(&fmt, ptr, index) };
-            let mixed = soft_limit(current + mic_sample);
-            write_sample(&fmt, ptr, index, mixed);
+            write_sample(&fmt, ptr, index, soft_limit(current + mic_sample));
         }
     }
-
-    // 按系统声音的节奏消费麦克风队列。
-    let consumed = ((frames as f64 * step).round() as usize) * CHANNELS;
-    let take = consumed.min(mic.len());
-    mic.drain(..take);
     true
 }

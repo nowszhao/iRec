@@ -15,6 +15,7 @@ the desktop by default.
   - [Control window](#control-window)
   - [Global hotkeys](#global-hotkeys)
   - [Region recording](#region-recording)
+- [Annotating](#annotating)
   - [The line](#the-line)
   - [Menu bar & settings](#menu-bar--settings)
 - [Output & measured size](#output--measured-size)
@@ -40,6 +41,7 @@ the desktop by default.
 | Encoding | HEVC hardware encoding, YUV420 sampling, adjustable quality / frame rate / resolution |
 | Output | MP4 (HEVC + AAC) named `iRec-YYYYMMDD-HHMMSS.mp4`, saved to `~/Desktop` |
 | Screenshots | `⇧⌘S` full screen; `⇧⌘A` the current selection (or pick one first); the region's control bar has a "Screenshot" button. Saved as PNG (`iRec-shot-YYYYMMDD-HHMMSS.png`) and hung on the line |
+| Annotating | Arrows, boxes and text drawn right in iRec; image cards on the line have an "Annotate" button, and the menu has "Annotate latest screenshot…" |
 | The line | Finished recordings hang from a clothesline under the menu bar: rest the pointer there to drop it, click a card to reveal it in Finder, drag it into an app or a folder, click the cross to take it off |
 
 ## Requirements
@@ -185,6 +187,22 @@ Moving or resizing during a recording does **not** change the captured area of t
 recording (this avoids jumps in the video). The new region applies to the **next**
 recording, and the control bar shows a hint for that.
 
+### Annotating
+
+After a screenshot (or from the "Annotate" button on an image card, or "Annotate latest
+screenshot…" in the menu) the annotation window opens:
+
+| Control | What it does |
+| :-- | :-- |
+| Arrow | Drag out a line; it becomes an arrow on release |
+| Box | Drag out a rectangle |
+| Text | Click on the image, type, press Return to confirm |
+| Undo / `⌘Z` | Removes the last annotation |
+| Done / Cancel / `Esc` | Saves over the original PNG (the line's thumbnail updates at once) / discards |
+
+macOS' own Markup is registered as a sharing service and will not come up on many machines,
+so iRec ships its own. Saving writes back over the file, keeping its size and resolution.
+
 ### The line
 
 A finished recording is more than a line of text in the menu: it hangs from a clothesline
@@ -228,7 +246,8 @@ instead of screenshots.
 ### Menu bar & settings
 
 The menu offers, in order: start recording (full screen), select record region, stop recording,
-screenshot (full screen), screenshot (region), audio (four-option submenu), quality
+screenshot (full screen), screenshot (region), annotate latest screenshot…, open Markup after a
+screenshot, audio (four-option submenu), quality
 (Smaller / Balanced / High / Max), frame rate (30 / 60), resolution
 (1x / 2x), show / hide the line, bring the line down when the pointer rests in the menu bar, hang
 recordings on the line, clear the line, reveal latest recording, open control window…, request /

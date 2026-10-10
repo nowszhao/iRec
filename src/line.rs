@@ -148,6 +148,14 @@ fn layout_x(index: usize, count: usize, width: f64) -> f64 {
 
 // MARK: - 一张卡片
 
+/// 指针落在卡片的哪儿。
+#[derive(Clone, Copy, PartialEq)]
+enum Hit {
+    Card,
+    Close,
+    Annotate,
+}
+
 struct Peg {
     id: u64,
     path: PathBuf,
@@ -230,7 +238,9 @@ struct LineState {
     /// 绳子窗口顶边离屏幕顶边多远（顶空间），飞行目标要用到。
     panel_top: f64,
     /// 按下但还没决定是点击还是拖动：卡片 id、是否按在叉上、按下的位置。
-    press: Option<(u64, bool, NSPoint)>,
+    press: Option<(u64, Hit, NSPoint)>,
+    /// 「标注」按钮用的铅笔图标（SF Symbol），建一次就留着。
+    annotate_icon: Option<Retained<NSImage>>,
     /// 正在被拖走的那张卡片。
     dragging: Option<u64>,
     /// 小手光标是否已经设上（只在变化时改，别去抢别的应用的光标）。
@@ -264,6 +274,7 @@ impl Default for LineState {
             screen: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
             panel_top: 0.0,
             press: None,
+            annotate_icon: None,
             dragging: None,
             hand: false,
             clickable: false,
@@ -388,7 +399,7 @@ define_class!(
             let hit = self.hit(point);
             let mut st = self.ivars().state.borrow_mut();
             st.press = match hit {
-                Some((index, close)) => st.items.get(index).map(|item| (item.id, close, point)),
+                Some((index, on)) => st.items.get(index).map(|item| (item.id, on, point)),
                 None => None,
             };
         }
@@ -397,8 +408,8 @@ define_class!(
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
             let press = self.ivars().state.borrow().press;
-            let Some((id, on_close, start)) = press else { return };
-            if on_close {
+            let Some((id, on, start)) = press else { return };
+            if on != Hit::Card {
                 return;
             }
             let point = self.convertPoint_fromView(event.locationInWindow(), None);
@@ -415,16 +426,20 @@ define_class!(
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             let press = self.ivars().state.borrow_mut().press.take();
-            let Some((id, on_close, _)) = press else { return };
+            let Some((id, on, _)) = press else { return };
             let index = self.ivars().state.borrow().items.iter().position(|i| i.id == id);
             let Some(index) = index else { return };
             let option = event.modifierFlags().contains(NSEventModifierFlags::Option);
-            if on_close {
-                self.take_off(index, option);
-            } else if event.clickCount() >= 2 {
-                self.open(index);
-            } else {
-                self.reveal_in_finder(index);
+            match on {
+                Hit::Close => self.take_off(index, option),
+                Hit::Annotate => self.annotate(index),
+                Hit::Card => {
+                    if event.clickCount() >= 2 {
+                        self.open(index);
+                    } else {
+                        self.reveal_in_finder(index);
+                    }
+                }
             }
         }
 
@@ -468,8 +483,8 @@ impl LineView {
         unsafe { msg_send![super(this), init] }
     }
 
-    /// 指针落在哪张卡片上（以及是不是落在那个叉上）。
-    fn hit(&self, point: NSPoint) -> Option<(usize, bool)> {
+    /// 指针落在哪张卡片上（以及落在叉上还是标注上）。
+    fn hit(&self, point: NSPoint) -> Option<(usize, Hit)> {
         let st = self.ivars().state.borrow();
         let dy = HIDDEN * (1.0 - st.slide);
         let (px, py) = (point.x, st.height - (point.y - dy));
@@ -490,13 +505,28 @@ impl LineView {
             if !inside {
                 continue;
             }
-            // 叉画在卡片左上角（顶空间里往下 3 点起），命中范围比画出来的大一圈，好点。
+            // 叉画在左上角、标注画在右上角，命中范围都比画出来的大一圈，好点。
             let hit = 26.0;
-            let on_close = lx >= left - 3.0
-                && lx <= left + 3.0 + hit
+            let hovered = item.hover_mix > 0.5;
+            if hovered
                 && ly >= top - 3.0
-                && ly <= top + 3.0 + hit;
-            return Some((index, on_close && item.hover_mix > 0.5));
+                && ly <= top + 3.0 + hit
+                && lx >= left - 3.0
+                && lx <= left + 3.0 + hit
+            {
+                return Some((index, Hit::Close));
+            }
+            let right = left + item.card_w();
+            if hovered
+                && !item.video
+                && ly >= top - 3.0
+                && ly <= top + 3.0 + hit
+                && lx >= right - 3.0 - hit
+                && lx <= right + 3.0
+            {
+                return Some((index, Hit::Annotate));
+            }
+            return Some((index, Hit::Card));
         }
         None
     }
@@ -820,7 +850,7 @@ impl LineView {
         }
     }
 
-    /// 指针悬停：卡片轻轻抬起、叉子浮现，光标变成小手。返回指针是否压在某张卡片上。
+    /// 指针悬停：卡片轻轻抬起、叉子和标注浮现，光标变成小手。返回指针是否压在某张卡片上。
     fn update_hover(&self) -> bool {
         let pointer = {
             let st = self.ivars().state.borrow();
@@ -912,6 +942,33 @@ impl LineView {
             {
                 self.take_off(index, true);
             }
+        }
+    }
+
+    /// 把这张卡片交给系统标注，改完把新的缩略图换上去。
+    fn annotate(&self, index: usize) {
+        let path = self.path_at(index);
+        let Some(path) = path else { return };
+        crate::markup::edit(path, |path| {
+            crate::line::refresh(path);
+        });
+    }
+
+    /// 文件被改过（比如标注完）：重新读一次图，换掉卡片上的缩略图。
+    fn refresh_image(&self, path: PathBuf) {
+        let Some(image) = NSImage::initWithContentsOfFile(
+            NSImage::alloc(),
+            &NSString::from_str(&path.to_string_lossy()),
+        ) else {
+            return;
+        };
+        let photo = fit(image.size());
+        let mut st = self.ivars().state.borrow_mut();
+        if let Some(item) = st.items.iter_mut().find(|i| i.path == path) {
+            item.image = image;
+            item.photo = photo;
+            item.bubble = Some(("已保存".to_string(), Instant::now()));
+            nudge(&mut item.swing_v, 3.0);
         }
     }
 
@@ -1260,6 +1317,9 @@ fn draw_line(view: &LineView) {
         }
         if item.hover_mix > 0.01 {
             draw_close(card, item.hover_mix);
+            if !item.video {
+                draw_annotate(card, item.hover_mix, st.annotate_icon.as_deref());
+            }
         }
         if let Some((text, _)) = item.bubble.as_ref() {
             draw_bubble(card, text);
@@ -1474,6 +1534,27 @@ fn text_attrs(size: f64, white: bool) -> Retained<NSMutableDictionary<NSString, 
     attrs
 }
 
+/// 右上角的「标注」按钮：一支铅笔，点了就打开系统标注。
+fn draw_annotate(card: NSRect, mix: f64, icon: Option<&NSImage>) {
+    let size = 20.0 * (0.6 + 0.4 * mix);
+    let r = NSRect::new(
+        NSPoint::new(
+            card.origin.x + card.size.width - 3.0 - size,
+            card.origin.y + card.size.height - 3.0 - size,
+        ),
+        NSSize::new(size, size),
+    );
+    let circle = NSBezierPath::bezierPathWithOvalInRect(r);
+    NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.92 * mix).setFill();
+    circle.fill();
+    circle.setLineWidth(0.5);
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.12 * mix).setStroke();
+    circle.stroke();
+    if let Some(icon) = icon {
+        icon.drawInRect(inset_rect(r, size * 0.26));
+    }
+}
+
 fn draw_bubble(card: NSRect, text: &str) {
     let string = NSString::from_str(text);
     let attrs = text_attrs(11.0, true);
@@ -1584,6 +1665,12 @@ pub fn init(mtm: MainThreadMarker) {
     ));
     flight_panel.setContentView(Some(&flight_view));
 
+    view.ivars().state.borrow_mut().annotate_icon =
+        NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("pencil"),
+            None,
+        );
+
     let timer = unsafe {
         NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
             1.0 / 60.0,
@@ -1620,6 +1707,13 @@ pub fn hang_later(path: PathBuf, region: Option<Rect>) {
         }
         Err(err) => crate::state::log(&format!("line: 缩略图生成失败：{err}")),
     });
+}
+
+/// 文件被改过之后刷新缩略图（主线程）。
+pub fn refresh(path: PathBuf) {
+    if let Some(view) = line_view() {
+        view.refresh_image(path);
+    }
 }
 
 /// 截图已经拿到图像了，直接挂上去（可以在任何线程调用）。

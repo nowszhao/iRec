@@ -3,6 +3,7 @@ mod frame;
 mod hotkey;
 mod hud;
 mod line;
+mod markup;
 mod mic;
 mod overlay;
 mod recorder;
@@ -10,7 +11,7 @@ mod shot;
 mod state;
 
 use std::cell::{OnceCell, RefCell};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -59,6 +60,8 @@ struct AppIvars {
     line_toggle_item: OnceCell<Retained<NSMenuItem>>,
     line_hover_item: OnceCell<Retained<NSMenuItem>>,
     line_enable_item: OnceCell<Retained<NSMenuItem>>,
+    annotate_item: OnceCell<Retained<NSMenuItem>>,
+    markup_item: OnceCell<Retained<NSMenuItem>>,
 }
 
 define_class!(
@@ -153,6 +156,21 @@ define_class!(
         #[unsafe(method(shotRegion:))]
         fn shot_region(&self, _sender: &AnyObject) {
             push_action(Action::PickShot);
+        }
+
+        #[unsafe(method(annotateLast:))]
+        fn annotate_last(&self, _sender: &AnyObject) {
+            if let Some(path) = self.latest_shot() {
+                push_action(Action::Markup(path));
+            }
+        }
+
+        #[unsafe(method(toggleMarkup:))]
+        fn toggle_markup(&self, _sender: &AnyObject) {
+            with_state(|s| {
+                s.settings.markup = !s.settings.markup;
+                persist(&s.settings);
+            });
         }
 
         #[unsafe(method(setAudioSource:))]
@@ -611,6 +629,14 @@ impl AppDelegate {
         let shot_region = menu_item(mtm, "截取选区      ⇧⌘A", Some(sel!(shotRegion:)), self, 0);
         menu.addItem(&shot_region);
 
+        let annotate = menu_item(mtm, "标注最新截图…", Some(sel!(annotateLast:)), self, 0);
+        menu.addItem(&annotate);
+        self.ivars().annotate_item.set(annotate).ok();
+
+        let markup = menu_item(mtm, "截图后打开标注", Some(sel!(toggleMarkup:)), self, 0);
+        menu.addItem(&markup);
+        self.ivars().markup_item.set(markup).ok();
+
         menu.addItem(&NSMenuItem::separatorItem(mtm));
 
         let audio_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("声音"));
@@ -805,6 +831,11 @@ impl AppDelegate {
             Action::ShotRegion(rect) => {
                 self.screenshot(Some(rect));
             }
+            Action::Markup(path) => {
+                crate::markup::edit(path, |path| {
+                    line::refresh(path);
+                });
+            }
         }
     }
 
@@ -942,6 +973,32 @@ impl AppDelegate {
         });
     }
 
+    /// 最近一张截图（用于「标注最新截图…」）。
+    fn latest_shot(&self) -> Option<PathBuf> {
+        let saved = with_state(|s| s.last_saved.as_ref().map(|(p, _)| p.clone()));
+        if let Some(path) = saved {
+            if is_image(&path) {
+                return Some(path);
+            }
+        }
+        let dir = with_state(|s| s.settings.out_dir.clone());
+        let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !is_image(&path) || !path.to_string_lossy().contains("iRec-shot-") {
+                    continue;
+                }
+                let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
+                let modified = modified.unwrap_or(std::time::UNIX_EPOCH);
+                if best.as_ref().map(|(_, t)| modified > *t).unwrap_or(true) {
+                    best = Some((path, modified));
+                }
+            }
+        }
+        best.map(|(path, _)| path)
+    }
+
     /// 截图：抓一帧存成 PNG，然后挂到晾衣绳上。
     fn screenshot(&self, region: Option<Rect>) {
         let settings = with_state(|s| s.settings.clone());
@@ -951,11 +1008,18 @@ impl AppDelegate {
             &settings.out_dir,
             true,
             move |result| match result {
-                Ok((path, bytes)) => with_state(|s| {
-                    s.last_saved = Some((path, bytes));
-                    s.saved_at = Some(Instant::now());
-                    s.last_error = None;
-                }),
+                Ok((path, bytes)) => {
+                    let markup = with_state(|s| s.settings.markup);
+                    with_state(|s| {
+                        s.last_saved = Some((path.clone(), bytes));
+                        s.saved_at = Some(Instant::now());
+                        s.last_error = None;
+                    });
+                    // 标注要在主线程开，交给定时器那一轮。
+                    if markup {
+                        push_action(Action::Markup(path));
+                    }
+                }
                 Err(err) => {
                     eprintln!("irec: {err}");
                     with_state(|s| s.last_error = Some(err));
@@ -1077,6 +1141,12 @@ impl AppDelegate {
         }
         if let Some(item) = self.ivars().line_enable_item.get() {
             item.setState(state_value(enabled));
+        }
+        if let Some(item) = self.ivars().markup_item.get() {
+            item.setState(state_value(with_state(|s| s.settings.markup)));
+        }
+        if let Some(item) = self.ivars().annotate_item.get() {
+            item.setEnabled(self.latest_shot().is_some());
         }
         if let Some(item) = self.ivars().status_line.get() {
             let blocked = with_state(|s| s.permission_blocked);
@@ -1238,6 +1308,16 @@ fn build_main_menu(mtm: MainThreadMarker, target: &AppDelegate) -> Retained<NSMe
     std::mem::forget(app_menu);
     std::mem::forget(app_item);
     main
+}
+
+fn is_image(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("png") | Some("jpg") | Some("jpeg") | Some("tiff") | Some("heic")
+    )
 }
 
 /// 给 sh 用的单引号转义。

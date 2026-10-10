@@ -7,7 +7,7 @@ use crate::recorder::Recorder;
 
 /// Commands queued from the menu bar, global hotkeys and the region picker.
 /// They are drained on the main thread by the app delegate's timer.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     /// Start/stop a full screen recording.
     ToggleFull,
@@ -23,6 +23,8 @@ pub enum Action {
     PickShot,
     /// Screenshot the selected rectangle (Cocoa screen coordinates).
     ShotRegion(Rect),
+    /// Open a saved image in the system Markup editor.
+    Markup(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,6 +126,8 @@ pub struct Settings {
     pub line: bool,
     /// 指针停在菜单栏时把绳子放下来。
     pub line_hover: bool,
+    /// 截完图是否直接打开系统标注。
+    pub markup: bool,
 }
 
 impl Default for Settings {
@@ -137,6 +141,7 @@ impl Default for Settings {
             out_dir: dirs_desktop(),
             line: true,
             line_hover: true,
+            markup: true,
         }
     }
 }
@@ -149,6 +154,7 @@ const KEY_FPS: &str = "fps";
 const KEY_SCALE: &str = "scale";
 const KEY_LINE: &str = "line";
 const KEY_LINE_HOVER: &str = "lineHover";
+const KEY_MARKUP: &str = "markup";
 
 pub fn load_persisted(settings: &mut Settings) {
     use objc2_foundation::{NSUserDefaults, NSString};
@@ -184,6 +190,9 @@ pub fn load_persisted(settings: &mut Settings) {
         .is_some()
     {
         settings.line_hover = defaults.boolForKey(&NSString::from_str(KEY_LINE_HOVER));
+    }
+    if defaults.objectForKey(&NSString::from_str(KEY_MARKUP)).is_some() {
+        settings.markup = defaults.boolForKey(&NSString::from_str(KEY_MARKUP));
     }
 }
 

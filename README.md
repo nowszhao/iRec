@@ -5,6 +5,8 @@ macOS 菜单栏常驻的屏幕录制工具，Rust 编写。全屏或选区录制
 
 [English](./README.en.md) | 简体中文
 
+项目主页：<https://nowszhao.github.io/iRec/>
+
 ## 目录
 
 - [特性](#特性)

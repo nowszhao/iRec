@@ -6,6 +6,8 @@ the desktop by default.
 
 [简体中文](./README.md) | English
 
+Project page: <https://nowszhao.github.io/iRec/>
+
 ## Contents
 
 - [Features](#features)

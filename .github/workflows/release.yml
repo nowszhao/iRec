@@ -54,10 +54,16 @@ jobs:
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
         run: ./scripts/package_release.sh
 
+      # 说明取自 CHANGELOG 最新一节，安装文案按有没有公证自动切换。
+      - name: Compose release notes
+        env:
+          SIGNED: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+        run: ./scripts/release_notes.sh > dist/RELEASE_BODY.md
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: dist/RELEASE_BODY.md
           files: |
             dist/*.zip
             dist/SHA256SUMS
-          generate_release_notes: true

@@ -66,6 +66,40 @@ SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build_app.sh
 
 Pushing a `v*` tag makes GitHub Actions build both architectures and publish the release.
 
+### Signing and distribution
+
+Release bundles are **ad-hoc signed and not notarised**, so macOS blocks the first launch
+(Gatekeeper says the app is damaged or comes from an unidentified developer). Users must
+right-click → Open, or run `xattr -dr com.apple.quarantine /Applications/iRec.app`. Ad-hoc
+signing also gives every build a new code identity, so the Screen Recording grant is lost
+after each update.
+
+To ship the way other macOS open-source apps do, sign with a Developer ID and notarise:
+
+1. Join the Apple Developer Program ($99/year).
+2. Create a **Developer ID Application** certificate plus an **App Store Connect API key**
+   (App Store Connect → Users and Access → Integrations, role: Developer).
+3. Export the certificate as `.p12` and add these repository secrets
+   (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+| --- | --- |
+| `MACOS_CERTIFICATE` | `base64 <cert.p12>` |
+| `MACOS_CERTIFICATE_PASSWORD` | password of that `.p12` |
+| `KEYCHAIN_PASSWORD` | any string; used for the temporary keychain in CI |
+| `DEVELOPER_ID_APPLICATION` | `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` / `APPLE_API_PRIVATE_KEY` | API key (`.p8`, base64) |
+
+4. Push a `v*` tag: the workflow signs with the hardened runtime, notarises with
+   `notarytool`, staples the ticket, checks the result with `spctl`, and writes
+   "notarised, just double-click" into the release notes instead of the quarantine hint.
+
+Check any build yourself:
+
+```sh
+./scripts/check_signature.sh target/release/iRec.app   # Gatekeeper verdict + ticket
+```
+
 ## Usage
 
 | Hotkey | Action |

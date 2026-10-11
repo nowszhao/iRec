@@ -61,6 +61,37 @@ SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build_app.sh
 
 推送 `v*` 标签会触发 GitHub Actions 构建两个架构并发布 release。
 
+### 签名与分发
+
+现在 Releases 里的包是 **ad-hoc 签名、未公证**，所以别人第一次打开会被 Gatekeeper 拦住
+（提示「已损坏」或「身份不明的开发者」）：要么右键 → 打开，要么执行
+`xattr -dr com.apple.quarantine /Applications/iRec.app`。ad-hoc 签名每次构建都是新的
+代码身份，所以更新之后屏幕录制授权也会丢。
+
+想和其他 macOS 开源项目一样双击就能装，需要 Developer ID 签名 + 公证：
+
+1. 加入 Apple Developer Program（$99/年）。
+2. 建一个 **Developer ID Application** 证书，再建一个 **App Store Connect API key**
+   （App Store Connect → 用户和访问 → 集成，角色选 Developer）。
+3. 把证书导出成 `.p12`，在仓库 Settings → Secrets and variables → Actions 里配这几个：
+
+| Secret | 内容 |
+| --- | --- |
+| `MACOS_CERTIFICATE` | `base64 <证书.p12>` |
+| `MACOS_CERTIFICATE_PASSWORD` | 那个 `.p12` 的密码 |
+| `KEYCHAIN_PASSWORD` | 任意字符串，CI 里临时钥匙串用 |
+| `DEVELOPER_ID_APPLICATION` | `Developer ID Application: 你的名字 (TEAMID)` |
+| `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` / `APPLE_API_PRIVATE_KEY` | API key（`.p8`，base64） |
+
+4. 之后照常打 `v*` 标签：工作流会用 hardened runtime 签名、`notarytool` 公证、附票据，
+   再用 `spctl` 复核一遍，release 说明里的安装文案也会自动换成「已公证，双击打开」。
+
+自己检查某个包：
+
+```sh
+./scripts/check_signature.sh target/release/iRec.app   # Gatekeeper 结论 + 票据
+```
+
 ## 使用
 
 | 快捷键 | 作用 |

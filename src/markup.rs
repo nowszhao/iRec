@@ -118,6 +118,40 @@ impl Mark {
         }
     }
 
+    /// 选中后可以拖的手柄（图片坐标，y 朝下）：箭头两端，框图右下角，文字右端。
+    fn handles(&self) -> Vec<(f64, f64)> {
+        match &self.kind {
+            Kind::Arrow { from, to } => vec![*from, *to],
+            Kind::Rect { x, y, w, h } => vec![(*x + *w, *y + *h)],
+            Kind::Text { x, y, size, text } => {
+                let w = (text.chars().count() as f64 * *size).max(*size);
+                vec![(*x + w, *y)]
+            }
+        }
+    }
+
+    /// 拖手柄：改形状（箭头挪端点，框图改大小，文字改字号）。
+    fn resize(&mut self, index: usize, p: (f64, f64)) {
+        match &mut self.kind {
+            Kind::Arrow { from, to } => {
+                if index == 0 {
+                    *from = p;
+                } else {
+                    *to = p;
+                }
+            }
+            Kind::Rect { x, y, w, h } => {
+                *w = (p.0 - *x).max(8.0);
+                *h = (p.1 - *y).max(8.0);
+            }
+            Kind::Text { x, size, text, .. } => {
+                let old = (text.chars().count() as f64 * *size).max(*size);
+                let next = (p.0 - *x).max(8.0);
+                *size = (*size * next / old).clamp(8.0, 400.0);
+            }
+        }
+    }
+
     /// 点中了没有（tolerance 用图片单位）。
     fn hit(&self, p: (f64, f64), tol: f64) -> bool {
         match &self.kind {
@@ -161,6 +195,8 @@ struct CanvasIvars {
     selected: Cell<Option<usize>>,
     /// 拖动选中标记时的上一个位置。
     last: Cell<(f64, f64)>,
+    /// 正在拖第几个手柄（选中标记的）。
+    handle: Cell<Option<usize>>,
     path: RefCell<Option<PathBuf>>,
     window: RefCell<Option<Retained<NSWindow>>>,
     field: RefCell<Option<Retained<NSTextField>>>,
@@ -178,6 +214,7 @@ impl Default for CanvasIvars {
             drag: Cell::new(None),
             selected: Cell::new(None),
             last: Cell::new((0.0, 0.0)),
+            handle: Cell::new(None),
             path: RefCell::new(None),
             window: RefCell::new(None),
             field: RefCell::new(None),
@@ -224,6 +261,24 @@ define_class!(
             match self.ivars().tool.get() {
                 Tool::Select => {
                     let tol = self.tolerance();
+                    // 先问手柄：命中就缩放，不移动。
+                    if let Some(index) = self.ivars().selected.get() {
+                        let handles = self
+                            .ivars()
+                            .marks
+                            .borrow()
+                            .get(index)
+                            .map(|mark| mark.handles())
+                            .unwrap_or_default();
+                        if let Some(handle) = handles
+                            .iter()
+                            .position(|h| (h.0 - p.0).abs() <= tol * 1.6 && (h.1 - p.1).abs() <= tol * 1.6)
+                        {
+                            self.ivars().handle.set(Some(handle));
+                            self.setNeedsDisplay(true);
+                            return;
+                        }
+                    }
                     let index = self
                         .ivars()
                         .marks
@@ -235,10 +290,12 @@ define_class!(
                         .map(|(index, _)| index);
                     self.ivars().selected.set(index);
                     self.ivars().last.set(p);
+                    self.ivars().handle.set(None);
                 }
                 Tool::Text => self.begin_text(p),
                 Tool::Arrow | Tool::Rect => {
                     self.ivars().selected.set(None);
+                    self.ivars().handle.set(None);
                     self.ivars().drag.set(Some((p, p)));
                 }
             }
@@ -250,6 +307,12 @@ define_class!(
             let p = self.to_image(self.convert(event.locationInWindow()));
             if let Some((from, _)) = self.ivars().drag.get() {
                 self.ivars().drag.set(Some((from, p)));
+            } else if let Some(handle) = self.ivars().handle.get() {
+                if let Some(index) = self.ivars().selected.get() {
+                    if let Some(mark) = self.ivars().marks.borrow_mut().get_mut(index) {
+                        mark.resize(handle, p);
+                    }
+                }
             } else if let Some(index) = self.ivars().selected.get() {
                 let last = self.ivars().last.get();
                 let (dx, dy) = (p.0 - last.0, p.1 - last.1);
@@ -263,6 +326,7 @@ define_class!(
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
+            self.ivars().handle.set(None);
             let Some((from, to)) = self.ivars().drag.take() else {
                 return;
             };
@@ -447,6 +511,7 @@ impl CanvasView {
             self.paint_mark(mark);
             if self.ivars().selected.get() == Some(index) {
                 self.paint_selection(mark);
+                self.paint_handles(mark);
             }
         }
         if let Some((from, to)) = self.ivars().drag.get() {
@@ -551,6 +616,24 @@ impl CanvasView {
         unsafe { path.setLineDash_count_phase(pattern.as_ptr(), 2, 0.0) };
         NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.85).setStroke();
         path.stroke();
+    }
+
+    /// 手柄：白色小圆点，拖它就能改形状。
+    fn paint_handles(&self, mark: &Mark) {
+        let r = 4.0;
+        for handle in mark.handles() {
+            let p = self.to_view(handle);
+            let dot = NSRect::new(
+                NSPoint::new(p.x - r, p.y - r),
+                NSSize::new(r * 2.0, r * 2.0),
+            );
+            let path = NSBezierPath::bezierPathWithOvalInRect(dot);
+            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.95).setFill();
+            path.fill();
+            path.setLineWidth(1.5);
+            NSColor::colorWithSRGBRed_green_blue_alpha(0.15, 0.15, 0.16, 0.9).setStroke();
+            path.stroke();
+        }
     }
 
     fn begin_text(&self, at: (f64, f64)) {
@@ -662,7 +745,9 @@ impl CanvasView {
             if let Some(content) = window.contentView() {
                 for sub in unsafe { content.subviews() }.iter() {
                     if let Some(bar) = sub.downcast_ref::<MarkupBar>() {
-                        bar.refresh();
+                        let tool = self.ivars().tool.get();
+                        let color = self.ivars().color.get();
+                        bar.apply(tool as usize, color);
                     }
                 }
             }
@@ -697,7 +782,10 @@ impl NSShadowForMarkup {
 }
 
 #[derive(Default)]
-struct BarIvars {}
+struct BarIvars {
+    tool: Cell<usize>,
+    color: Cell<usize>,
+}
 
 /// 工具条：图标化的工具 + 颜色 + 撤销 / 完成 / 取消。
 define_class!(
@@ -718,6 +806,26 @@ define_class!(
             line.moveToPoint(NSPoint::new(0.0, bounds.size.height - 0.5));
             line.lineToPoint(NSPoint::new(bounds.size.width, bounds.size.height - 0.5));
             line.stroke();
+            // 当前工具：垫一块高亮；当前颜色：外面一圈白环。
+            let tool = self.ivars().tool.get();
+            let mark = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                NSRect::new(
+                    NSPoint::new(12.0 + tool as f64 * 38.0, 7.0),
+                    NSSize::new(34.0, 32.0),
+                ),
+                6.0,
+                6.0,
+            );
+            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.16).setFill();
+            mark.fill();
+            let color = self.ivars().color.get();
+            let ring = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+                NSPoint::new(178.0 + color as f64 * 28.0 - 1.0, 9.0),
+                NSSize::new(26.0, 26.0),
+            ));
+            ring.setLineWidth(2.0);
+            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.95).setStroke();
+            ring.stroke();
         }
     }
 );
@@ -730,16 +838,117 @@ impl MarkupBar {
         this
     }
 
-    fn refresh(&self) {
-        // 按钮的选中态由 canvas 在切换时同步。
+    /// 当前工具 / 颜色变了，由 canvas 调过来。
+    fn apply(&self, tool: usize, color: usize) {
+        self.ivars().tool.set(tool);
+        self.ivars().color.set(color);
         self.setNeedsDisplay(true);
     }
+}
+
+/// 22×22 的白色图标，自己画，免得模板色在深色条上看不见。
+fn tool_icon(index: usize) -> Retained<NSImage> {
+    let size = 22.0;
+    let block = RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
+        let white = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.92);
+        white.setStroke();
+        white.setFill();
+        let y = |v: f64| size - v; // 手写时用 y 朝下，画的时候翻过来
+        match index {
+            // 光标
+            0 => {
+                let path = NSBezierPath::bezierPath();
+                path.moveToPoint(NSPoint::new(4.0, y(3.0)));
+                path.lineToPoint(NSPoint::new(4.0, y(17.0)));
+                path.lineToPoint(NSPoint::new(8.5, y(13.0)));
+                path.lineToPoint(NSPoint::new(11.5, y(19.0)));
+                path.lineToPoint(NSPoint::new(14.0, y(18.0)));
+                path.lineToPoint(NSPoint::new(11.0, y(12.0)));
+                path.lineToPoint(NSPoint::new(17.0, y(12.0)));
+                path.closePath();
+                path.fill();
+            }
+            // 箭头
+            1 => {
+                let path = NSBezierPath::bezierPath();
+                path.setLineWidth(1.8);
+                path.moveToPoint(NSPoint::new(4.0, y(18.0)));
+                path.lineToPoint(NSPoint::new(18.0, y(5.0)));
+                path.stroke();
+                for (dx, dy) in [(11.0, 6.0), (17.0, 12.0)] {
+                    let head = NSBezierPath::bezierPath();
+                    head.setLineWidth(1.8);
+                    head.moveToPoint(NSPoint::new(18.0, y(5.0)));
+                    head.lineToPoint(NSPoint::new(dx, y(dy)));
+                    head.stroke();
+                }
+            }
+            // 框图
+            2 => {
+                let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                    NSRect::new(NSPoint::new(3.5, y(17.0)), NSSize::new(15.0, 12.0)),
+                    2.0,
+                    2.0,
+                );
+                path.setLineWidth(1.8);
+                path.stroke();
+            }
+            // 文字：一个 T
+            3 => {
+                let font = NSFont::boldSystemFontOfSize(15.0);
+                let attrs: Retained<NSMutableDictionary<NSString, AnyObject>> =
+                    NSMutableDictionary::new();
+                unsafe {
+                    let object: &AnyObject = &*font;
+                    attrs.setObject_forKey(object, ProtocolObject::from_ref(NSFontAttributeName));
+                    let object: &AnyObject = &*white;
+                    attrs.setObject_forKey(
+                        object,
+                        ProtocolObject::from_ref(NSForegroundColorAttributeName),
+                    );
+                    let string = NSString::from_str("T");
+                    string.drawAtPoint_withAttributes(
+                        NSPoint::new(6.5, y(17.0)),
+                        Some(&attrs),
+                    );
+                }
+            }
+            _ => {}
+        }
+        let _ = rect;
+        objc2::runtime::Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(size, size), false, &block)
+}
+
+/// 撤销：一个左转的箭头符号。
+fn undo_icon() -> Retained<NSImage> {
+    let size = 22.0;
+    let block = RcBlock::new(move |_rect: NSRect| -> objc2::runtime::Bool {
+        let white = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.92);
+        let attrs: Retained<NSMutableDictionary<NSString, AnyObject>> =
+            NSMutableDictionary::new();
+        unsafe {
+            let font = NSFont::systemFontOfSize(16.0);
+            let object: &AnyObject = &*font;
+            attrs.setObject_forKey(object, ProtocolObject::from_ref(NSFontAttributeName));
+            let object: &AnyObject = &*white;
+            attrs.setObject_forKey(
+                object,
+                ProtocolObject::from_ref(NSForegroundColorAttributeName),
+            );
+            let string = NSString::from_str("\u{21BA}");
+            string.drawAtPoint_withAttributes(NSPoint::new(4.0, 1.0), Some(&attrs));
+        }
+        objc2::runtime::Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(size, size), false, &block)
 }
 
 /// 一个图标按钮。
 fn icon_button(
     mtm: MainThreadMarker,
-    symbol: &str,
+    image: &NSImage,
     tip: &str,
     frame: NSRect,
     action: objc2::runtime::Sel,
@@ -747,12 +956,7 @@ fn icon_button(
     tag: isize,
 ) -> Retained<NSButton> {
     let button = unsafe { NSButton::initWithFrame(NSButton::alloc(mtm), frame) };
-    if let Some(image) =
-        NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), None)
-    {
-        unsafe { image.setTemplate(true) };
-        button.setImage(Some(&image));
-    }
+    button.setImage(Some(image));
     button.setImagePosition(NSCellImagePosition::ImageOnly);
     button.setBordered(false);
     button.setToolTip(Some(&NSString::from_str(tip)));
@@ -1000,10 +1204,11 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
         ("rectangle", "框图"),
         ("textformat", "文字"),
     ];
-    for (index, (symbol, tip)) in tools.iter().enumerate() {
+    for (index, (_symbol, tip)) in tools.iter().enumerate() {
+        let image = tool_icon(index);
         let button = icon_button(
             mtm,
-            symbol,
+            &image,
             tip,
             NSRect::new(NSPoint::new(14.0 + index as f64 * 38.0, 9.0), NSSize::new(30.0, 28.0)),
             sel!(toolClicked:),
@@ -1026,7 +1231,7 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
     }
     bar.addSubview(&icon_button(
         mtm,
-        "arrow.uturn.backward",
+        &undo_icon(),
         "撤销",
         NSRect::new(NSPoint::new(canvas_w - 210.0, 9.0), NSSize::new(30.0, 28.0)),
         sel!(undoMark:),

@@ -200,6 +200,7 @@ colours, then undo, cancel and done (`⌘↩`).
 | Arrow / Box | Drag out a line or a rectangle; the tool returns to Select so you can move it |
 | Text | Click on the image, type, press Return to confirm |
 | Select | Click a mark to select it (dashed outline), then drag to move it |
+| Resize | Drag a white handle: both ends of an arrow, the bottom-right of a box, the right end of a text (further out makes it bigger) |
 | Colour | With a mark selected, a click recolours it |
 | `⌫` / Undo | Deletes the selected mark / the last one |
 | Done `⌘↩` / Cancel `Esc` | Saves over the original PNG (thumbnail updates at once) / discards |

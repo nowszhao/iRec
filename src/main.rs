@@ -133,6 +133,19 @@ define_class!(
                 with_state(|s| s.last_error = Some(err));
                 self.finish();
             }
+            // 捕获窗口关掉后把热键装回去（Esc 取消也是走这条）。
+            if *CAPTURE_ACTIVE.lock().unwrap_or_else(|e| e.into_inner()) {
+                let open = self
+                    .ivars()
+                    .capture_panel
+                    .get()
+                    .map(|panel| panel.isVisible())
+                    .unwrap_or(false);
+                if !open {
+                    *CAPTURE_ACTIVE.lock().unwrap_or_else(|e| e.into_inner()) = false;
+                    self.apply_hotkeys();
+                }
+            }
             self.maybe_auto_check_update();
             self.refresh_status();
             self.refresh_menu();
@@ -1252,6 +1265,8 @@ impl AppDelegate {
     fn begin_capture(&self, slot: u32) {
         let mtm = self.mtm();
         *CAPTURE_SLOT.lock().unwrap_or_else(|e| e.into_inner()) = slot;
+        *CAPTURE_ACTIVE.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        hotkey::unregister_all();
         let panel = match self.ivars().capture_panel.get() {
             Some(panel) => panel.clone(),
             None => {
@@ -1270,10 +1285,16 @@ impl AppDelegate {
             Hotkeys::label(slot)
         )));
         panel.makeKeyAndOrderFront(None);
-        if let Some(view) = self.ivars().capture_view.get() {
-            panel.makeFirstResponder(Some(&**view));
-        }
+        let responder = match self.ivars().capture_view.get() {
+            Some(view) => panel.makeFirstResponder(Some(&**view)),
+            None => false,
+        };
         NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        log(&format!(
+            "capture: slot={} ({}) firstResponder={responder}",
+            slot,
+            Hotkeys::label(slot)
+        ));
     }
 
     fn build_capture_panel(&self, mtm: MainThreadMarker) -> Retained<NSWindow> {
@@ -1291,7 +1312,10 @@ impl AppDelegate {
         window.setSharingType(objc2_app_kit::NSWindowSharingType(0));
         window.setTitle(ns_string!("按下新的快捷键"));
 
-        let view = CaptureView::new(mtm);
+        let view = CaptureView::new(
+            mtm,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(340.0, 150.0)),
+        );
         let hint = make_label(
             mtm,
             "按下新的组合键…\n⌫ 清除，Esc 取消",
@@ -1701,6 +1725,8 @@ impl AppDelegate {
 
 /// 正在等用户按组合键的槽位（CaptureView 靠它知道要改哪一个）。
 static CAPTURE_SLOT: Mutex<u32> = Mutex::new(1);
+/// 正在等按键：这期间先摘掉全局热键，免得按 ⇧⌘R 顺手就开始录制了。
+static CAPTURE_ACTIVE: Mutex<bool> = Mutex::new(false);
 
 #[derive(Default)]
 struct CaptureIvars {
@@ -1718,12 +1744,6 @@ define_class!(
     impl CaptureView {
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
-            true
-        }
-
-        // 别让窗口把 ⌘X 这类按键当成菜单快捷键吃掉。
-        #[unsafe(method(performKeyEquivalent:))]
-        fn perform_key_equivalent(&self, _event: &NSEvent) -> bool {
             true
         }
 
@@ -1761,9 +1781,9 @@ define_class!(
 );
 
 impl CaptureView {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(CaptureIvars::default());
-        unsafe { msg_send![super(this), init] }
+        unsafe { msg_send![super(this), initWithFrame: frame] }
     }
 }
 

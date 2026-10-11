@@ -162,23 +162,6 @@ iRec --selftest --seconds 5                                # 不启界面直接�
 每 5 秒刷一次 movie fragment，即使崩溃留下的文件也能播，不会变成打不开的空壳。
 停止录制在后台线程收尾，退出时会把正在录的文件写完。
 
-## 代码结构
-
-| 模块 | 职责 |
-| --- | --- |
-| `src/recorder.rs` | ScreenCaptureKit 采集 + `AVAssetWriter` 封装 |
-| `src/frame.rs` | 帧拷进自己的像素缓冲池，并按区域裁剪 |
-| `src/hotkey.rs` | Carbon `RegisterEventHotKey`（不需要辅助功能权限） |
-| `src/overlay.rs` | 全屏透明窗口，拖拽框选 |
-| `src/hud.rs` | 常驻选区框、控制条、改大小手柄 |
-| `src/line.rs` | 晾衣绳：面板、手绘卡片、逐帧积分的弹簧 |
-| `src/shot.rs` | `SCScreenshotManager` 取帧 → PNG |
-| `src/audio.rs` | PCM 读取、重采样与混音 |
-| `src/state.rs` | 设置与命令队列（主线程定时器统一执行） |
-
-区域录制是先整屏采集再逐帧裁剪：把 ScreenCaptureKit 的子区域帧直接喂给
-`AVAssetWriter` 会报 `AVFoundationErrorDomain -11800`。
-
 ## 已知限制
 
 - 只录主显示器。

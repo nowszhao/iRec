@@ -180,24 +180,6 @@ Movies are flushed as fragments every 5 seconds, so a crash leaves a playable fi
 of an unopenable stub. Stopping finishes the file on a background thread, and quitting
 writes out whatever is in progress.
 
-## Project layout
-
-| Module | Responsibility |
-| --- | --- |
-| `src/recorder.rs` | ScreenCaptureKit capture + `AVAssetWriter` muxing |
-| `src/frame.rs` | Frame copy into an owned pixel buffer pool, region cropping |
-| `src/hotkey.rs` | Carbon `RegisterEventHotKey` (no Accessibility permission needed) |
-| `src/overlay.rs` | Full-screen transparent window for drag selection |
-| `src/hud.rs` | Persistent selection frame, control bar and resize grip |
-| `src/line.rs` | The clothesline: panels, hand-drawn cards, per-frame springs |
-| `src/shot.rs` | Screenshots via `SCScreenshotManager` → PNG |
-| `src/audio.rs` | PCM read-out, resampling and mixing |
-| `src/state.rs` | Settings and the command queue drained on the main thread |
-
-Region recording captures the whole display and crops while copying frames: feeding
-ScreenCaptureKit sub-region frames straight into `AVAssetWriter` fails with
-`AVFoundationErrorDomain -11800`.
-
 ## Known limitations
 
 - Only the main display is recorded.

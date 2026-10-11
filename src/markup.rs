@@ -640,11 +640,13 @@ impl CanvasView {
         self.commit_text_field();
         let mtm = self.mtm();
         let view_point = self.to_view(at);
+        // 锚点是文字的左上角，输入框的顶边就压在锚点上，
+        // 这样回车之后文字不会跳位置（视图坐标 y 朝上，框要往下让出高度）。
         let field = unsafe {
             NSTextField::initWithFrame(
                 NSTextField::alloc(mtm),
                 NSRect::new(
-                    NSPoint::new(view_point.x, view_point.y),
+                    NSPoint::new(view_point.x, view_point.y - 30.0),
                     NSSize::new(220.0, 30.0),
                 ),
             )

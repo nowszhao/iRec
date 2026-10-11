@@ -1,376 +1,211 @@
 # iRec
 
-macOS 菜单栏常驻的录屏与截图工具，Rust 编写。全屏 / 选区录制、截图与标注，可带系统声音，
-录屏输出 HEVC + AAC 的 `.mp4`，截图存 PNG，默认都保存到桌面。
+A menu-bar recorder and screenshot tool for macOS, written in Rust. Capture the full
+screen or a selected region with optional audio, grab screenshots, annotate them, and
+hang the result on a clothesline under the menu bar.
 
-[English](./README.en.md) | 简体中文
+[简体中文](./README.zh.md) | English
 
-项目主页：<https://nowszhao.github.io/iRec/>
+Project page: <https://nowszhao.github.io/iRec/>
 
-## 目录
+## Features
 
-- [特性](#特性)
-- [系统要求](#系统要求)
-- [安装与构建](#安装与构建)
-- [使用](#使用)
-  - [控制窗口](#控制窗口)
-  - [全局快捷键](#全局快捷键)
-  - [选区录制](#选区录制)
-- [标注](#标注)
-  - [晾衣绳](#晾衣绳)
-  - [菜单栏与设置项](#菜单栏与设置项)
-- [输出规格与实测体积](#输出规格与实测体积)
-- [权限与排错](#权限与排错)
-- [命令行自测](#命令行自测)
-- [实现要点](#实现要点)
-- [稳定性设计](#稳定性设计)
-- [已知限制](#已知限制)
-- [应用图标](#应用图标)
+- **Recording** — full screen or a drag-selected region, HEVC hardware encoding, MP4
+  (HEVC + AAC). Quality, frame rate (30 / 60) and resolution (1x / 2x) are adjustable.
+- **Audio** — off / system audio / microphone / system + microphone, each on its own track.
+- **Screenshots** — full screen or the selected region, saved as PNG.
+- **Annotation** — arrows, boxes and text drawn in iRec; move, resize and recolour any
+  mark, then write back over the original PNG.
+- **The clothesline** — results hang under the menu bar: rest the pointer there to drop
+  the line, then click, double-click or drag a card wherever you need it.
+- **Quiet by default** — no Dock icon, no window on launch, everything in the status menu.
+- **Never in the shot** — the control window, selection frame and the line use
+  `NSWindowSharingType::None`, and the line tucks away while recording.
+- **Auto-update** — checks GitHub Releases on its own and swaps `iRec.app` on request.
+- **Command line** — `iRec --shot`, `iRec --update`, `iRec --selftest`.
 
-## 特性
+## Requirements
 
-| 能力 | 说明 |
+macOS 13.0 or later, plus the Screen Recording permission (requested on the first real
+capture — see [Permissions](#permissions)). Building needs a Rust toolchain (edition 2024)
+and the Xcode command line tools.
+
+## Install
+
+Download the package for your Mac from
+[Releases](https://github.com/nowszhao/iRec/releases):
+
+| Mac | Package |
 | --- | --- |
-| 一键唤起 | `⇧⌘R` 全屏录制 / 停止；`⇧⌘E` 进入区域框选，录制中再按一次停止 |
-| 全屏 / 选区 | 区域为拖拽框选，框选过程中按任意键取消 |
-| 选区框常驻 | 框选结束后选区框留在屏幕上，可拖动、可改大小，控制条上直接开始或停止录制 |
-| 静默常驻 | 启动后只在菜单栏显示（无 Dock 图标、不弹窗口），全部操作在菜单栏菜单中完成 |
-| 状态即按钮状态 | 未录制时「停止录制」置灰；录制中「开始录制（全屏）」「选择区域录制」置灰 |
-| 自身不入镜 | 控制窗口、选区框与晾衣绳窗口设为 `NSWindowSharingType::None`，不会被录进视频 |
-| 声音 | 四档可选：关闭 / 系统声音 / 麦克风 / 系统声音 + 麦克风（各占一条音轨） |
-| 保存位置 | 默认 `~/Desktop`，菜单栏「选择保存位置…」可改，设置持久化（重启后保留） |
-| 编码 | HEVC 硬件编码 + YUV420 采样，画质 / 帧率 / 分辨率可调 |
-| 输出 | MP4（HEVC + AAC），文件名 `iRec-年月日-时分秒.mp4`，默认 `~/Desktop` |
-| 截图 | `⇧⌘S` 全屏截图；`⇧⌘A` 截取当前选区（没框选过就先框一次）；框选后的控制条上有「截屏」。存 PNG（`iRec-shot-年月日-时分秒.png`）并挂到晾衣绳上 |
-| 标注 | 截完可以直接在 iRec 里画箭头、框图、打字；录屏外的卡片悬停时有「标注」按钮，菜单里也有「标注最新截图…」 |
-| 晾衣绳 | 录完的视频挂在菜单栏下面的一根绳子上：指针在菜单栏停留即放下，单击在访达中显示，可拖到别的 App / 文件夹，叉号取下 |
+| Apple Silicon (M1 / M2 / M3 / M4 …) | `iRec-<version>-arm64.zip` |
+| Intel | `iRec-<version>-x86_64.zip` |
 
-## 系统要求
+Run `uname -m` if unsure. Unzip and drag `iRec.app` into Applications.
 
-- macOS 13.0 及以上（`LSMinimumSystemVersion = 13.0`）
-- 屏幕录制权限（首次实际采集时申请，见[权限与排错](#权限与排错)）
-- 构建：Rust 工具链（edition 2024），Xcode 命令行工具
+Release bundles are ad-hoc signed (no Developer ID is configured in CI), so Gatekeeper may
+block the first launch: right-click → Open, or run
+`xattr -dr com.apple.quarantine /Applications/iRec.app`.
 
-## 下载
-
-从 [Releases](https://github.com/nowszhao/iRec/releases) 下载对应芯片的包：
-
-| 机型 | 包 |
-| --- | --- |
-| Apple Silicon（M1 / M2 / M3 / M4 …） | `iRec-<版本>-arm64.zip` |
-| Intel | `iRec-<版本>-x86_64.zip` |
-
-不确定就先在终端执行 `uname -m`：`arm64` 选第一个，`x86_64` 选第二个。
-下载后解压，把 `iRec.app` 拖进「应用程序」。
-
-包是 ad-hoc 签名（未用 Developer ID 公证），首次打开可能被 Gatekeeper 拦住：
-在 Finder 里**右键 → 打开**，或执行
-`xattr -dr com.apple.quarantine /Applications/iRec.app`。
-
-## 自动更新
-
-iRec 会自己去 GitHub Releases 看有没有新版本：
-
-- 启动 5 秒后静默查一次，之后每 24 小时一次；也可以随时用菜单栏的「检查更新…」手动查
-- 有新版本时菜单栏出现「↑ 发现新版本 v0.1.x，点此更新」，点一下就下载对应芯片的包、
-  换掉 iRec.app 并重新打开；不想被查就把「启动时检查更新」关掉
-- 命令行也能查：`iRec --update`
-- 只替换当前这个 iRec.app：目录没写权限时会提示去 Releases 页面手动下载
-- 换包后签名变了，屏幕录制权限可能要重新授权一次
-
-## 安装与构建
+### Build from source
 
 ```sh
-git clone ssh://git@ssh.github.com:443/nowszhao/iRec.git
-cd iRec
+git clone ssh://git@ssh.github.com:443/nowszhao/iRec.git && cd iRec
 
-./scripts/build_app.sh              # 编译 release 并打包为 target/release/iRec.app
-cargo build --release               # 仅编译二进制（target/release/iRec）
+./scripts/build_app.sh            # release build → target/release/iRec.app
+ARCH=x86_64 ./scripts/build_app.sh   # arm64 | x86_64 | universal
+./scripts/package_release.sh      # one zip per architecture + SHA256SUMS into dist/
 ```
 
-打包脚本默认做 ad-hoc 签名——**每次重建都会生成新的代码身份，系统会当成新 app，录制
-权限要重新授权一次**。固定用开发者证书签名就不会失效（TeamIdentifier 稳定），装好后
-授权一次即可：
+Sign with a stable certificate to keep the Screen Recording grant across rebuilds — ad-hoc
+signing (the default) gives every build a new code identity:
 
 ```sh
 SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build_app.sh
 ```
 
-安装到应用程序目录：
+Pushing a `v*` tag makes GitHub Actions build both architectures and publish the release.
+
+## Usage
+
+| Hotkey | Action |
+| --- | --- |
+| `⇧⌘R` | Start / stop full-screen recording |
+| `⇧⌘E` | Open the region picker (press again while recording to stop) |
+| `⇧⌘S` | Screenshot the full screen |
+| `⇧⌘A` | Screenshot the selected region (pick one first if needed) |
+| `⌘Q` | Quit, after finalising the file in progress |
+
+Click the menu bar item for recording, audio, quality, save location, the line and
+permission checks. "Open control window…" brings up the same controls in a window; closing
+it only hides it.
+
+Selecting a region leaves a frame on screen with its own control bar: drag the bar to
+move it, drag the grip to resize it, and use **Screenshot** or **Start recording** there.
+Changing the region during a recording applies to the next one, so the current video never
+jumps.
+
+## Screenshots and annotation
+
+Screenshots are saved as `iRec-shot-YYYYMMDD-HHMMSS.png` and hung on the line. Annotate
+straight after capturing, or via "Annotate latest screenshot…" in the menu / the Annotate
+button on an image card.
+
+| Control | Behaviour |
+| --- | --- |
+| Arrow / box | Drag one out; the tool returns to Select so you can move it at once |
+| Text | Click, type, press Return |
+| Select | Click a mark to select it, then drag to move |
+| Resize | Drag the white handles: both ends of an arrow, a box corner, the end of a text |
+| Colour | Recolours the selected mark |
+| `⌫` / undo | Delete the selected mark / the last one |
+| `⌘↩` / `Esc` | Save over the original PNG (size and resolution unchanged) / discard |
+
+macOS' own Markup is a sharing service and fails to come up on many machines, so iRec
+ships its own editor.
+
+## The clothesline
+
+Finished recordings and screenshots hang from a rope under the menu bar, pegged with a
+play button on the first frame.
+
+The line rests above the screen edge: rest the pointer in the menu bar for 0.25 s and it
+slides down, move away and it tucks back after 0.5 s. It also shows itself for 2.5 s after
+a capture and stays hidden while one is running.
+
+| Gesture | Result |
+| --- | --- |
+| Click / double-click a card | Reveal in Finder / open in the default player |
+| Drag into an app or a folder | The destination gets the file, the card stays |
+| Drag onto the Dock's Trash | File to the Trash, card leaves the line |
+| Click the cross (⌥ + click) | Take it off the line (⌥ also trashes the file) |
+
+A card only leaves the line when you take it off or clear the line — dragging it somewhere
+or deleting the file elsewhere keeps it hanging. At most eight hang at once.
+
+The animation idea comes from [Tendedero](https://github.com/alejandrobujan/tendedero)
+(MIT), reimplemented with hand-drawn AppKit and its own spring integration in `src/line.rs`.
+
+## Settings and auto-update
+
+Settings (save location, audio source, quality, frame rate, resolution, line behaviour) are
+persisted in `NSUserDefaults`. The default save location is `~/Desktop`; recordings are
+named `iRec-YYYYMMDD-HHMMSS.mp4`.
+
+Updates are checked 5 seconds after launch and then every 24 hours. When a newer version
+exists the menu shows "↑ New version v0.1.x, click to update": clicking downloads the
+matching package, swaps `iRec.app` and relaunches. "Check for updates…" does it on demand,
+"Check for updates on launch" turns the automatic check off, and `iRec --update` does it
+from the shell. The bundle signature changes with every update, so Screen Recording may
+need to be granted again.
+
+## Permissions
+
+Screen Recording is requested on the first real capture, not at launch. If recording still
+fails:
+
+1. Quit iRec completely.
+2. System Settings → Privacy & Security → Screen Recording: toggle iRec off and on
+   (enable every entry if there are several).
+3. Relaunch iRec — macOS applies a grant only to processes started afterwards.
+
+When a start fails, iRec says so and offers **Relaunch iRec** as the first button; the menu
+status line turns into "⚠ Screen Recording permission not in effect — click to relaunch".
+The microphone is granted the same way under Privacy & Security → Microphone.
+
+Two things make a grant look revoked: rebuilding (ad-hoc signing creates a new code
+identity each time) and changing the signature or the bundle id `com.nows.irec`.
+
+## Command line
 
 ```sh
-cp -R target/release/iRec.app /Applications/
+iRec --shot [--region x,y,w,h] [--scale 2] [--out <dir>]   # screenshot (y from the bottom)
+iRec --update                                              # check for updates
+iRec --selftest --seconds 5                                # capture without the UI
 ```
 
-## 使用
+`--selftest` also takes `--fps`, `--scale`, `--out`, `--audio off|system|mic|both` and
+`--region`; set `SCREEN_REC_DEBUG=1` for capture diagnostics. The log is at
+`~/Library/Logs/irec.log`.
 
-iRec 是菜单栏应用：启动后**静默常驻**，不显示 Dock 图标，也不自动弹出窗口。
-点击菜单栏图标（空心圆点 + `REC`，录制中变红点并显示 `● 00:12`，结束后短暂显示
-`✓ 12.3 MB`）打开菜单，录制、画质、权限检查、退出等全部操作都在这里完成。
-需要可视化操作时，点菜单里的「打开控制窗口…」唤出控制窗口；关闭窗口只是隐藏它，
-不会退出应用（退出请用菜单里的「退出」）。
+## Output
 
-### 控制窗口
-
-默认不显示，从菜单栏菜单的「打开控制窗口…」唤出；关闭窗口只隐藏不退出。
-
-
-| 控件 | 行为 |
+| Item | Value |
 | --- | --- |
-| 开始录制（全屏） | 开始录制；录制中置灰并显示「录制中…」 |
-| 选择区域录制 | 进入全屏框选；录制中置灰 |
-| 停止录制 | 仅在录制中可点；其余时间置灰 |
-| 声音 | 关闭 / 系统声音 / 麦克风 / 系统声音 + 麦克风 |
-| 画质 / 帧率 / 分辨率 | 更小体积 · 均衡 · 高清 · 极清 / 30 · 60 fps / 1x · 2x |
-| 在访达中显示 | 在 Finder 中选中最近一次录制 |
-| 申请 / 检查屏幕录制权限 | 主动触发系统授权并给出结论 |
+| Container / codecs | MP4, HEVC video (hardware), AAC 128 kbps / 48 kHz stereo |
+| Sampling | YUV420 |
+| Defaults | Balanced quality, 30 fps, 2x (Retina pixels), system audio on |
+| Measured size | ≈ 21 MB per minute at 3456×2234, Balanced quality |
 
-窗口底部实时显示状态：`就绪`、`● 录制中 00:12`、`正在保存…`、`已保存 xxx（12.3 MB）`。
+Movies are flushed as fragments every 5 seconds, so a crash leaves a playable file instead
+of an unopenable stub. Stopping finishes the file on a background thread, and quitting
+writes out whatever is in progress.
 
-### 全局快捷键
+## Project layout
 
-| 快捷键 | 作用 |
+| Module | Responsibility |
 | --- | --- |
-| `⇧⌘R` | 开始 / 停止全屏录制 |
-| `⇧⌘E` | 进入区域框选；录制中按一次停止当前录制 |
-| `⇧⌘S` | 截取全屏 |
-| `⇧⌘A` | 进入区域框选，松手即截图 |
-| `⌘Q` | 退出（控制窗口激活时可用；退出前会先写完当前文件） |
+| `src/recorder.rs` | ScreenCaptureKit capture + `AVAssetWriter` muxing |
+| `src/frame.rs` | Frame copy into an owned pixel buffer pool, region cropping |
+| `src/hotkey.rs` | Carbon `RegisterEventHotKey` (no Accessibility permission needed) |
+| `src/overlay.rs` | Full-screen transparent window for drag selection |
+| `src/hud.rs` | Persistent selection frame, control bar and resize grip |
+| `src/line.rs` | The clothesline: panels, hand-drawn cards, per-frame springs |
+| `src/shot.rs` | Screenshots via `SCScreenshotManager` → PNG |
+| `src/audio.rs` | PCM read-out, resampling and mixing |
+| `src/state.rs` | Settings and the command queue drained on the main thread |
 
-### 选区录制
+Region recording captures the whole display and crops while copying frames: feeding
+ScreenCaptureKit sub-region frames straight into `AVAssetWriter` fails with
+`AVFoundationErrorDomain -11800`.
 
-1. `⇧⌘E` 或点「选择区域录制」，拖拽框出目标范围（框选时按任意键取消）。
-2. 松开鼠标后**选区框留在原地**，上方出现控制条：`宽 × 高 · 计时`、`截屏`、
-   `开始录制`、`关闭`。
-3. 拖动控制条整体移动选区，拖动右下角圆点调整大小。
-   截完的图可以直接标注，见[标注](#标注)。
-4. 点「开始录制」：框变红、控制条显示计时、按钮变为「停止录制」；点「截屏」
-   则把当前这块区域截成 PNG，选区框原地保留，方便同一区域连着录和截。
-5. 点「停止录制」结束；选区框保留在原处，便于对同一区域连续录制。
+## Known limitations
 
-录制中移动或改大小不会改变当前正在录制的范围（避免视频跳变），新区域在**下一次**
-录制时生效，控制条会提示「新区域下次生效」。
+- Only the main display is recorded.
+- Release bundles are not notarised.
+- Hotkeys are fixed (`register_defaults` in `src/hotkey.rs`).
+- Changing the region during a recording applies to the next one.
+- If a drop destination moves the file, the card keeps pointing at the old path.
 
-### 标注
+## License
 
-截完图（或点晾衣绳上图片卡片右上角的「标注」、菜单「标注最新截图…」）会打开标注窗口：
-
-工具条在最下面一排图标，从左到右：**选择**（默认）、箭头、框图、文字，接着是四种颜色，
-右边是撤销、取消、完成（`⌘↩`）。
-
-| 操作 | 说明 |
-| :-- | :-- |
-| 箭头 / 框图 | 选中后拖一条线或一个矩形；画完自动回到选择工具，方便马上挪 |
-| 文字 | 选中后在图上点一下，输入文字，回车确认 |
-| 选择 | 点一下标记选中它（外面有虚线框），拖着走就能挪位置 |
-| 改大小 | 选中后拖白色圆点手柄：箭头两头各一个（改方向 / 长度）、框图右下角一个（改大小）、文字右端一个（拖远字就变大） |
-| 颜色 | 选中标记后点颜色可以直接改它的颜色 |
-| `⌫` / 撤销 | 删掉选中的标记 / 去掉最后一个 |
-| 完成 `⌘↩` / 取消 `Esc` | 保存（覆盖原 PNG，缩略图随即更新）/ 放弃 |
-
-图片下面垫了阴影、背景压暗，工具条只用图标，尽量不挡视线——照着 CleanShot / Snipaste
-那类工具的编辑界面做的。
-
-系统自带的 Markup 是注册在分享服务里的，不少机器上拉不起来，所以 iRec 自己做了一套；
-画完写回原文件，尺寸和分辨率不变。
-
-### 晾衣绳
-
-录完的视频不会只在菜单栏留一行字——它会挂到菜单栏下面的一根绳子上：第一帧加一个
-播放键，用夹子夹着，从你刚录的那块区域飞上来。
-
-绳子默认收在屏幕上方：指针在菜单栏停留 0.25 秒才滑下来，离开 0.5 秒自己收回去；
-刚录完的那 2.5 秒也会露一下脸。录制期间绳子一直收着，窗口本身也不会被录进视频。
-
-| 操作 | 结果 |
-| :-- | :-- |
-| 单击卡片 | 在访达中显示 |
-| 双击卡片 | 用默认播放器打开 |
-| 拖到别的 App | 送一份过去，卡片留在绳上 |
-| 拖到文件夹 / 桌面 / 对话框 | 文件留在那儿，卡片照样挂在绳上 |
-| 拖到 Dock 的废纸篓 | 文件进废纸篓，卡片下绳 |
-| 悬停后点叉 | 从绳上取下（文件留在原地） |
-| ⌥ + 点叉 | 从绳上取下，同时把文件丢进废纸篓 |
-
-拖动出的是真正的文件（文件 URL 交给系统的拖放会话），拖到哪儿由接收方决定：
-App 拿到的是副本，Finder 把文件收进文件夹，丢到废纸篓则由 iRec 自己把文件挪过去。
-
-**卡片只在两种情况下离开绳子**：点叉 / ⌥+点叉（手动删除，⌥ 会连文件一起丢进废纸篓），
-或者菜单栏「清空晾衣绳」。把录屏拖进文件夹、对话框，甚至文件被别的程序删掉，卡片都
-照样挂着——那时点它只会提示「文件已不在原处」。
-
-绳上最多挂 8 个，多了最旧那个自己掉下去；也可以从菜单栏「清空晾衣绳」一次收干净。
-对应的菜单项：显示 / 收起晾衣绳、指针停在菜单栏时放下、录完自动挂到晾衣绳、清空晾衣绳。
-
-这套动效的创意来自 [Tendedero](https://github.com/alejandrobujan/tendedero)（MIT）：
-两端淡出的抛物线绳子、夹上去先甩一下再慢慢停住的阻尼弹簧、隔一阵吹过整排卡片的风、
-飞上来时一路长出的玻璃边框和夹子、取下时一边转一边往下掉。iRec 用 AppKit 手绘加
-自己积分的弹簧（`src/line.rs`）复刻了它，卡片内容是录好的视频而不是截图。
-
-### 菜单栏与设置项
-
-菜单依次提供：开始录制（全屏）、选择区域录制、停止录制、截取全屏、截取选区、标注最新截图…、
-截图后打开标注、声音（四档子菜单）、
-画质（更小体积 / 均衡 / 高清 / 极清）、帧率（30 / 60）、分辨率（1x / 2x）、
-显示 / 收起晾衣绳、指针停在菜单栏时放下、录完自动挂到晾衣绳、清空晾衣绳、
-在访达中显示最新录制、打开控制窗口…、申请 / 检查屏幕录制权限、退出。
-其中「停止录制」仅在录制中可点，其余时间置灰。菜单项与控制窗口共享同一份设置。
-
-## 输出规格与实测体积
-
-| 项目 | 值 |
-| --- | --- |
-| 容器 / 编码 | MP4，视频 HEVC（硬件编码），音频 AAC 128 kbps / 48 kHz 立体声 |
-| 采样 | YUV420（`420v`，NV12） |
-| 默认参数 | 均衡画质、30 fps、2x（Retina 像素）、开启系统声音 |
-| 文件命名 | `iRec-年月日-时分秒.mp4`，重名自动加序号 |
-| 保存位置 | `~/Desktop`（`Settings::out_dir`） |
-| 日志 | `~/Library/Logs/irec.log` |
-
-实测（MacBook 内建屏 1728×1117，30 fps，均衡画质，录制 10 秒）：
-
-| 分辨率设置 | 实际分辨率 | 10 秒体积 | 折合每分钟 |
-| --- | --- | --- | --- |
-| 2x（默认高清） | 3456×2234 | 3.49 MB | ≈ 21 MB |
-| 1x（省空间） | 1728×1116 | 0.96 MB | ≈ 5.8 MB |
-
-## 保存位置
-
-默认是 `~/Desktop`。菜单栏里：
-
-- `保存位置：~/Desktop`（灰显，仅显示当前位置）
-- `选择保存位置…`：弹系统目录选择面板，可新建目录
-- `恢复为桌面`：改回 `~/Desktop`
-
-控制窗口里也有「保存位置：…（点击更改）」按钮。
-
-设置写入 `NSUserDefaults`（`com.nows.irec`），**重启后仍然保留**；除保存位置外，
-声音来源、画质、帧率、分辨率也会记住。想清掉就执行
-`defaults delete com.nows.irec`。
-
-## 声音
-
-| 选项 | 说明 |
-| --- | --- |
-| 关闭 | 只录画面，不写音轨 |
-| 系统声音 | 录制各应用播放的声音 |
-| 麦克风 | 只录麦克风 |
-| 系统声音 + 麦克风 | 两路 PCM 换算到 48 kHz 立体声后相加，混合成一条音轨 |
-
-选择含麦克风的档位时会立即向系统申请麦克风权限（首次会弹系统授权框）。
-内建麦克风的输入电平普遍偏低（实测峰值约 -54 dB），混入前统一放大约 +10 dB
-（`src/audio.rs` 的 `MIC_GAIN`，需要更大音量就调它）。如果 2 秒内没收到任何麦克风采样，
-日志 `~/Library/Logs/irec.log` 会写一条「麦克风未收到采样」提示，通常是权限没给或输入
-设备没信号。
-麦克风采样由 ScreenCaptureKit 的 `SCStreamOutputType::Microphone` 提供，格式为设备
-原生 PCM（实测 48 kHz / 单声道 / float32），在 `src/audio.rs` 里重采样、补声道并混入
-系统声音的采样缓冲。仅录麦克风时，系统声音的采样会先被静音覆盖再混音。
-
-## 权限与排错
-
-首次实际采集时才会向系统申请「屏幕录制」权限——macOS 15 的
-`CGPreflightScreenCaptureAccess()` 会误报未授权，启动时自动申请会导致系统反复弹窗。
-可随时点控制窗口里的「申请 / 检查屏幕录制权限」确认状态。
-
-若始终提示无权限：
-
-1. 完全退出 iRec（⌘Q 或点「退出」）——**只关窗口不算退出**。
-2. 系统设置 → 隐私与安全性 → 屏幕录制：关闭再打开 iRec（列表中有多条就全部打开；
-   没有则点 `+` 添加 `/Applications/iRec.app`）。
-3. 重新打开 iRec，点「申请 / 检查屏幕录制权限」查看结论。
-4. 临时兜底：终端执行 `/Applications/iRec.app/Contents/MacOS/iRec &`
-   （终端已获授权时可直接录制，窗口与快捷键同样可用）。
-
-**设置里已经勾了，但一录就报「用户拒绝了…TCC」**——这是 macOS 的行为：授权只对
-**之后启动的进程**生效，正在跑的那个 iRec 拿不到。现在开始失败时会直接弹提示，
-第一个按钮就是「重新启动 iRec」（退出后隔 1 秒自己重新打开），菜单栏状态行也会变成
-「⚠ 屏幕录制权限未生效，点此重启 iRec」，点它同样重启；一旦系统那边给到了权限，
-状态行会改口说「✓ 权限已开启，重启 iRec 后生效」。
-
-另外两种会让它「又变回没授权」的情况：
-
-- 重新编译：ad-hoc 签名（默认）每次重建都是一个新的代码身份，之前那次授权就作废了。
-  用 `SIGN_IDENTITY="Apple Development: 你的名字 (TEAMID)" ./scripts/build_app.sh`
-  签名可以固定身份，之后就不用反复授权。
-- 签名或 bundle id（`com.nows.irec`）变了，系统会当成新应用。
-
-麦克风同理：系统设置 → 隐私与安全性 → 麦克风，允许 iRec 后重启一次。
-
-## 命令行自测
-
-无需界面即可验证采集与封装：
-
-```sh
-cargo run --release -- --selftest --seconds 5                             # 全屏
-cargo run --release -- --selftest --seconds 5 --region 200,300,900,600    # 区域（Cocoa 坐标，y 自屏幕底部起算）
-cargo run --release -- --selftest --seconds 5 --no-audio --scale 1        # 关闭声音、1x
-cargo run --release -- --selftest --seconds 5 --audio mic                 # 只录麦克风
-cargo run --release -- --selftest --seconds 5 --audio both                # 系统声音 + 麦克风
-```
-
-可用参数：`--seconds`、`--region x,y,w,h`、`--fps`、`--scale`、`--out <dir>`、
-`--audio off|system|mic|both`（`--no-audio` 等价于 `off`）。
-
-也可以不进界面直接截图：
-
-```sh
-cargo run --release -- --shot --out /tmp/shots                            # 全屏
-cargo run --release -- --shot --region 200,417,600,400 --scale 2          # 区域（y 自屏幕底部起算）
-```
-设置 `SCREEN_REC_DEBUG=1` 可在 stderr 输出采集与编码的调试信息。
-
-## 实现要点
-
-| 模块 | 职责 |
-| --- | --- |
-| `src/recorder.rs` | ScreenCaptureKit 采集 + `AVAssetWriter`（HEVC/AAC）封装 MP4 |
-| `src/frame.rs` | 帧拷贝到自有 `CVPixelBufferPool` 并按选区裁剪 |
-| `src/hotkey.rs` | Carbon `RegisterEventHotKey`，无需辅助功能 / 输入监控权限 |
-| `src/overlay.rs` | 全屏透明 `NSWindow` + 自绘 `NSView` 实现拖拽框选 |
-| `src/hud.rs` | 常驻选区框：描边窗口、控制条、缩放把手三个窗口协同 |
-| `src/line.rs` | 晾衣绳：两个 `NSPanel`（绳子 / 飞行）与自绘卡片，摆动与滑动用弹簧积分 |
-| `src/shot.rs` | 截图：`SCScreenshotManager` 抓一帧 → PNG，再挂到晾衣绳上 |
-| `src/audio.rs` | PCM 读取、重采样与混音（麦克风混入系统声音） |
-| `src/state.rs` | 全局设置与命令队列（快捷键 / 菜单 / 框选动作统一在主线程定时器执行） |
-
-区域录制采用「整屏采集 + 拷贝时裁剪」，而不是直接把 ScreenCaptureKit 的子区域画面
-交给 `AVAssetWriter`——后者会失败（`AVFoundationErrorDomain -11800` / `OSStatus -16122`）。
-
-选区框、控制窗口均设置 `NSWindowSharingType::None`，同时采集时用
-`SCContentFilter` 排除本进程窗口，确保界面元素不会出现在录制结果中。
-
-## 稳定性设计
-
-- **分片写入**：每 5 秒写入一个 movie fragment。应用被强退或崩溃时，文件仍含 moov
-  与已写入分片，可以正常打开，而不是留下无法播放的空壳。
-- **收尾不阻塞主线程**：停止录制时在后台线程等待 `AVAssetWriter` 封口，主线程继续
-  运行 run loop，避免界面卡住导致文件永远不封口。
-- **退出即收尾**：退出或被终止前，先把正在录制的文件写完。
-- **编码失败早停**：编码器报错立即结束录制并提示，而不是继续写出损坏文件。
-
-## 已知限制
-
-- 仅录制主显示器。
-- 发布包未公证，跨机器分发时需要按上面的方式解除隔离属性。
-- 录制的是系统声音（各应用播放的音频），不含麦克风输入。
-- 快捷键固定为 `⇧⌘R` / `⇧⌘E`（见 `src/hotkey.rs` 的 `register_defaults`）。
-- 录制中调整选区不会改变当前视频的取景范围。
-- 绳子只挂在指针所在的那块屏幕上，录完自动露脸也只在那块屏幕上。
-- 拖放由接收方决定结果：拖进文件夹时 Finder 可能复制也可能移动；如果是移动，卡片仍指向原来的
-  路径，点它会提示「文件已不在原处」（想让它下绳就点叉，或「清空晾衣绳」）。
-
-## 应用图标
-
-`resources/icon.svg` 是唯一源文件（深色圆角方块 + 屏幕面板 + 选区四角 + 红色录制点），
-`resources/AppIcon.icns` 由它生成，并由 `scripts/build_app.sh` 打进 app。
-重新生成时须用 Chrome 无头模式渲染，`qlmanage` 会垫一层白底：
-
-```sh
-mkdir -p /tmp/icon.iconset
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
-  --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
-  --window-size=1024,1024 --default-background-color=00000000 \
-  --screenshot=/tmp/icon1024.png "file://$PWD/resources/icon.svg"
-# 再用 PIL / sips 生成 iconset 所需的 10 个尺寸，最后：
-iconutil -c icns /tmp/icon.iconset -o resources/AppIcon.icns
-```
+MIT — see [LICENSE](./LICENSE).

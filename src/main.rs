@@ -12,6 +12,7 @@ mod state;
 mod update;
 
 use std::cell::{OnceCell, RefCell};
+use std::sync::Mutex;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -23,9 +24,9 @@ use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSBackingStoreType, NSBezierPath, NSButton, NSButtonType, NSColor,
-    NSControlStateValueOff, NSControlStateValueOn, NSFont, NSImage, NSMenu, NSMenuItem,
+    NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSFont, NSImage, NSMenu, NSMenuItem,
     NSAlertSecondButtonReturn, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSStatusBar,
-    NSStatusItem, NSTextField, NSWarningAlertStyle, NSWindow, NSWindowStyleMask, NSWorkspace,
+    NSStatusItem, NSTextField, NSView, NSWarningAlertStyle, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
 use objc2_foundation::{
@@ -33,6 +34,7 @@ use objc2_foundation::{
     NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 
+use crate::hotkey::{Hotkey, Hotkeys, KVK_DELETE, KVK_ESCAPE, SLOTS};
 use crate::overlay::pick_region;
 use crate::recorder::Recorder;
 use crate::state::{
@@ -65,6 +67,14 @@ struct AppIvars {
     markup_item: OnceCell<Retained<NSMenuItem>>,
     update_item: OnceCell<Retained<NSMenuItem>>,
     update_check_item: OnceCell<Retained<NSMenuItem>>,
+    start_menu_item: OnceCell<Retained<NSMenuItem>>,
+    region_menu_item: OnceCell<Retained<NSMenuItem>>,
+    shot_full_item: OnceCell<Retained<NSMenuItem>>,
+    shot_region_item: OnceCell<Retained<NSMenuItem>>,
+    hotkey_window: OnceCell<Retained<NSWindow>>,
+    hotkey_fields: RefCell<Vec<Retained<NSTextField>>>,
+    capture_panel: OnceCell<Retained<NSWindow>>,
+    capture_view: OnceCell<Retained<CaptureView>>,
 }
 
 define_class!(
@@ -175,6 +185,26 @@ define_class!(
                 s.settings.markup = !s.settings.markup;
                 persist(&s.settings);
             });
+        }
+
+        #[unsafe(method(openHotkeys:))]
+        fn open_hotkeys_action(&self, _sender: &AnyObject) {
+            self.show_hotkey_window();
+        }
+
+        #[unsafe(method(captureHotkey:))]
+        fn capture_hotkey(&self, sender: &AnyObject) {
+            let tag: i64 = unsafe { objc2::msg_send![sender, tag] };
+            self.begin_capture(tag.max(0) as u32);
+        }
+
+        #[unsafe(method(restoreHotkeys:))]
+        fn restore_hotkeys(&self, _sender: &AnyObject) {
+            with_state(|s| {
+                s.settings.hotkeys = Hotkeys::default();
+                persist(&s.settings);
+            });
+            self.apply_hotkeys();
         }
 
         #[unsafe(method(checkUpdate:))]
@@ -414,10 +444,7 @@ impl AppDelegate {
         item.setMenu(Some(&self.build_menu(mtm)));
         self.ivars().status_item.set(item).ok();
 
-        if let Err(err) = hotkey::register_defaults() {
-            eprintln!("irec: hotkey registration failed: {err}");
-            with_state(|s| s.last_error = Some(format!("快捷键注册失败：{err}")));
-        }
+        self.apply_hotkeys();
 
         // Built but not shown: the app starts silently in the menu bar.
         let window = self.build_window(mtm);
@@ -591,11 +618,19 @@ impl AppDelegate {
             mtm,
             "保存位置：选择…",
             sel!(chooseOutputDir:),
-            NSRect::new(NSPoint::new(20.0, y), NSSize::new(width - 40.0, 30.0)),
+            NSRect::new(NSPoint::new(20.0, y), NSSize::new(170.0, 30.0)),
             self,
         );
         content.addSubview(&out_dir);
         self.ivars().out_dir_button.set(out_dir).ok();
+        let hotkey_button = make_button(
+            mtm,
+            "快捷键…",
+            sel!(openHotkeys:),
+            NSRect::new(NSPoint::new(200.0, y), NSSize::new(width - 220.0, 30.0)),
+            self,
+        );
+        content.addSubview(&hotkey_button);
 
         y -= 40.0;
         let reveal = make_button(
@@ -634,22 +669,26 @@ impl AppDelegate {
         // Otherwise AppKit re-enables the stop item on every menu open.
         menu.setAutoenablesItems(false);
 
-        let start = menu_item(mtm, "开始录制（全屏）   ⇧⌘R", Some(sel!(startFull:)), self, 0);
+        let start = menu_item(mtm, "开始录制（全屏）", Some(sel!(startFull:)), self, 0);
         menu.addItem(&start);
+        self.ivars().start_menu_item.set(start).ok();
 
-        let region = menu_item(mtm, "选择区域录制      ⇧⌘E", Some(sel!(pickRegion:)), self, 0);
+        let region = menu_item(mtm, "选择区域录制", Some(sel!(pickRegion:)), self, 0);
         menu.addItem(&region);
+        self.ivars().region_menu_item.set(region).ok();
 
         let stop = menu_item(mtm, "停止录制", Some(sel!(stopRecording:)), self, 0);
         menu.addItem(&stop);
         self.ivars().stop_menu_item.set(stop).ok();
 
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        let shot_full = menu_item(mtm, "截取全屏      ⇧⌘S", Some(sel!(shotFull:)), self, 0);
+        let shot_full = menu_item(mtm, "截取全屏", Some(sel!(shotFull:)), self, 0);
         menu.addItem(&shot_full);
+        self.ivars().shot_full_item.set(shot_full).ok();
 
-        let shot_region = menu_item(mtm, "截取选区      ⇧⌘A", Some(sel!(shotRegion:)), self, 0);
+        let shot_region = menu_item(mtm, "截取选区", Some(sel!(shotRegion:)), self, 0);
         menu.addItem(&shot_region);
+        self.ivars().shot_region_item.set(shot_region).ok();
 
         let annotate = menu_item(mtm, "标注最新截图…", Some(sel!(annotateLast:)), self, 0);
         menu.addItem(&annotate);
@@ -794,6 +833,9 @@ impl AppDelegate {
         menu.addItem(&permission);
         self.ivars().last_file.set(reveal).ok();
 
+        let hotkeys = menu_item(mtm, "快捷键设置…", Some(sel!(openHotkeys:)), self, 0);
+        menu.addItem(&hotkeys);
+
         let update_item = menu_item(mtm, "↑ 发现新版本，点此更新", Some(sel!(installUpdate:)), self, 0);
         update_item.setHidden(true);
         menu.addItem(&update_item);
@@ -887,6 +929,20 @@ impl AppDelegate {
                 crate::markup::edit(path, |path| {
                     line::refresh(path);
                 });
+            }
+            Action::SetHotkey { slot, key } => {
+                with_state(|s| {
+                    s.settings.hotkeys.set(slot, key);
+                    // 同一个组合只留一个：原来那个位置清空。
+                    s.settings.hotkeys.clear_conflicts(slot, key);
+                    persist(&s.settings);
+                });
+                log(&format!(
+                    "hotkey: {} → {}",
+                    Hotkeys::label(slot),
+                    key.display()
+                ));
+                self.apply_hotkeys();
             }
             Action::CheckUpdate
             | Action::UpdateFound(..)
@@ -1068,6 +1124,187 @@ impl AppDelegate {
         if install && choice == NSAlertFirstButtonReturn {
             self.install_update();
         }
+    }
+
+    /// 按当前设置重新注册热键，并把设置窗口里的显示刷新一遍。
+    fn apply_hotkeys(&self) {
+        let hotkeys = with_state(|s| s.settings.hotkeys);
+        log(&format!(
+            "hotkey: {} = {}, {} = {}, {} = {}, {} = {}",
+            Hotkeys::label(hotkey::SLOT_RECORD_FULL),
+            hotkeys.record_full.display(),
+            Hotkeys::label(hotkey::SLOT_RECORD_REGION),
+            hotkeys.record_region.display(),
+            Hotkeys::label(hotkey::SLOT_SHOT_FULL),
+            hotkeys.shot_full.display(),
+            Hotkeys::label(hotkey::SLOT_SHOT_REGION),
+            hotkeys.shot_region.display(),
+        ));
+        if let Err(err) = hotkey::apply(&hotkeys) {
+            log(&format!("hotkey: 注册失败 {err}"));
+            with_state(|s| s.last_error = Some(format!("快捷键注册失败：{err}")));
+        }
+        self.refresh_hotkey_window();
+    }
+
+    fn refresh_hotkey_window(&self) {
+        let hotkeys = with_state(|s| s.settings.hotkeys);
+        let fields = self.ivars().hotkey_fields.borrow();
+        for (index, slot) in SLOTS.iter().enumerate() {
+            if let Some(field) = fields.get(index) {
+                field.setStringValue(&NSString::from_str(&hotkeys.get(*slot).display()));
+            }
+        }
+    }
+
+    /// 打开快捷键设置窗口（菜单栏「快捷键设置…」）。
+    fn show_hotkey_window(&self) {
+        let mtm = self.mtm();
+        let window = match self.ivars().hotkey_window.get() {
+            Some(window) => window.clone(),
+            None => {
+                let window = self.build_hotkey_window(mtm);
+                self.ivars().hotkey_window.set(window.clone()).ok();
+                window
+            }
+        };
+        self.refresh_hotkey_window();
+        window.makeKeyAndOrderFront(None);
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
+
+    fn build_hotkey_window(&self, mtm: MainThreadMarker) -> Retained<NSWindow> {
+        let width = 360.0;
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, 236.0));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                frame,
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        window.setSharingType(objc2_app_kit::NSWindowSharingType(0));
+        window.setTitle(ns_string!("快捷键"));
+        let content = window.contentView().expect("content view");
+
+        let mut y = 180.0;
+        let title = make_label(
+            mtm,
+            "四个动作的全局快捷键",
+            NSRect::new(NSPoint::new(20.0, y), NSSize::new(width - 40.0, 22.0)),
+            14.0,
+        );
+        content.addSubview(&title);
+
+        for slot in SLOTS.iter() {
+            y -= 34.0;
+            let label = make_label(
+                mtm,
+                Hotkeys::label(*slot),
+                NSRect::new(NSPoint::new(20.0, y), NSSize::new(120.0, 22.0)),
+                13.0,
+            );
+            content.addSubview(&label);
+            let field = make_label(
+                mtm,
+                "",
+                NSRect::new(NSPoint::new(146.0, y), NSSize::new(110.0, 22.0)),
+                13.0,
+            );
+            content.addSubview(&field);
+            self.ivars().hotkey_fields.borrow_mut().push(field);
+            let button = make_button(
+                mtm,
+                "更改",
+                sel!(captureHotkey:),
+                NSRect::new(NSPoint::new(262.0, y), NSSize::new(78.0, 26.0)),
+                self,
+            );
+            button.setTag(*slot as isize);
+            content.addSubview(&button);
+        }
+
+        y -= 40.0;
+        let restore = make_button(
+            mtm,
+            "恢复默认",
+            sel!(restoreHotkeys:),
+            NSRect::new(NSPoint::new(20.0, y), NSSize::new(120.0, 30.0)),
+            self,
+        );
+        content.addSubview(&restore);
+        let hint = make_label(
+            mtm,
+            "新快捷键要带 ⌘ / ⌥ / ⌃",
+            NSRect::new(NSPoint::new(150.0, y + 5.0), NSSize::new(190.0, 20.0)),
+            11.0,
+        );
+        content.addSubview(&hint);
+
+        window.center();
+        window
+    }
+
+    /// 弹一个小窗口等用户按组合键：Esc 取消，⌫ 清除。
+    fn begin_capture(&self, slot: u32) {
+        let mtm = self.mtm();
+        *CAPTURE_SLOT.lock().unwrap_or_else(|e| e.into_inner()) = slot;
+        let panel = match self.ivars().capture_panel.get() {
+            Some(panel) => panel.clone(),
+            None => {
+                let panel = self.build_capture_panel(mtm);
+                self.ivars().capture_panel.set(panel.clone()).ok();
+                panel
+            }
+        };
+        if let Some(view) = self.ivars().capture_view.get() {
+            if let Some(hint) = view.ivars().hint.get() {
+                hint.setStringValue(&NSString::from_str("按下新的组合键…\n⌫ 清除，Esc 取消"));
+            }
+        }
+        panel.setTitle(&NSString::from_str(&format!(
+            "{} 的新快捷键",
+            Hotkeys::label(slot)
+        )));
+        panel.makeKeyAndOrderFront(None);
+        if let Some(view) = self.ivars().capture_view.get() {
+            panel.makeFirstResponder(Some(&**view));
+        }
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
+
+    fn build_capture_panel(&self, mtm: MainThreadMarker) -> Retained<NSWindow> {
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(340.0, 150.0));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                frame,
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        window.setSharingType(objc2_app_kit::NSWindowSharingType(0));
+        window.setTitle(ns_string!("按下新的快捷键"));
+
+        let view = CaptureView::new(mtm);
+        let hint = make_label(
+            mtm,
+            "按下新的组合键…\n⌫ 清除，Esc 取消",
+            NSRect::new(NSPoint::new(20.0, 40.0), NSSize::new(300.0, 60.0)),
+            14.0,
+        );
+        view.addSubview(&hint);
+        view.ivars().hint.set(hint).ok();
+        window.setContentView(Some(&view));
+        self.ivars().capture_view.set(view).ok();
+
+        window.center();
+        window
     }
 
     /// Opens the Screen Recording pane of System Settings.
@@ -1405,6 +1642,18 @@ impl AppDelegate {
         if let Some(item) = self.ivars().update_check_item.get() {
             item.setState(state_value(with_state(|s| s.settings.update_check)));
         }
+        let hotkeys = with_state(|s| s.settings.hotkeys);
+        let named = [
+            (self.ivars().start_menu_item.get(), "开始录制（全屏）", hotkeys.record_full),
+            (self.ivars().region_menu_item.get(), "选择区域录制", hotkeys.record_region),
+            (self.ivars().shot_full_item.get(), "截取全屏", hotkeys.shot_full),
+            (self.ivars().shot_region_item.get(), "截取选区", hotkeys.shot_region),
+        ];
+        for (item, name, key) in named {
+            if let Some(item) = item {
+                item.setTitle(&NSString::from_str(&format!("{name}   {}", key.display())));
+            }
+        }
         if let Some(item) = self.ivars().status_line.get() {
             let blocked = with_state(|s| s.permission_blocked);
             if blocked {
@@ -1447,6 +1696,74 @@ impl AppDelegate {
                 }
             }
         }
+    }
+}
+
+/// 正在等用户按组合键的槽位（CaptureView 靠它知道要改哪一个）。
+static CAPTURE_SLOT: Mutex<u32> = Mutex::new(1);
+
+#[derive(Default)]
+struct CaptureIvars {
+    hint: OnceCell<Retained<NSTextField>>,
+}
+
+define_class!(
+    #[unsafe(super = NSView)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = CaptureIvars]
+    struct CaptureView;
+
+    unsafe impl NSObjectProtocol for CaptureView {}
+
+    impl CaptureView {
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        // 别让窗口把 ⌘X 这类按键当成菜单快捷键吃掉。
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, _event: &NSEvent) -> bool {
+            true
+        }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            let slot = *CAPTURE_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(window) = self.window() else { return };
+            let code = event.keyCode();
+            if code == KVK_ESCAPE {
+                window.close();
+                return;
+            }
+            if code == KVK_DELETE {
+                push_action(Action::SetHotkey {
+                    slot,
+                    key: Hotkey::none(),
+                });
+                window.close();
+                return;
+            }
+            let key = Hotkey {
+                key_code: code as u32,
+                modifiers: Hotkey::event_modifiers(event.modifierFlags()),
+            };
+            if !key.valid() {
+                if let Some(hint) = self.ivars().hint.get() {
+                    hint.setStringValue(&NSString::from_str("要带上 ⌘ / ⌥ / ⌃ 之一，再按一次"));
+                }
+                return;
+            }
+            push_action(Action::SetHotkey { slot, key });
+            window.close();
+        }
+    }
+);
+
+impl CaptureView {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(CaptureIvars::default());
+        unsafe { msg_send![super(this), init] }
     }
 }
 
@@ -1609,7 +1926,11 @@ fn window_status(state: &AppState) -> String {
             *bytes as f64 / 1_048_576.0
         );
     }
-    "就绪 · 快捷键 ⇧⌘R 全屏 / ⇧⌘E 选区".to_string()
+    format!(
+        "就绪 · {} 录屏 / {} 截图",
+        state.settings.hotkeys.record_full.display(),
+        state.settings.hotkeys.shot_full.display()
+    )
 }
 
 fn state_value(on: bool) -> objc2_app_kit::NSControlStateValue {

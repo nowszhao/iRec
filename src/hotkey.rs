@@ -3,9 +3,13 @@
 //! Unlike `NSEvent` global monitors or `CGEventTap`s this needs no
 //! accessibility / input-monitoring permission, so the app works right after
 //! the very first launch.
+//!
+//! 四个动作的快捷键都能改，存在 NSUserDefaults 里（见 `state.rs` 的 Settings）。
 
 use std::ffi::c_void;
 use std::sync::Mutex;
+
+use objc2_app_kit::NSEventModifierFlags;
 
 use crate::state::{push_action, Action};
 
@@ -39,17 +43,22 @@ pub type EventHandlerCallRef = *mut c_void;
 
 pub const K_EVENT_CLASS_KEYBOARD: u32 = 0x6b657962; // 'keyb'
 pub const K_EVENT_HOT_KEY_PRESSED: u32 = 5;
-pub const K_EVENT_PARAM_DIRECT_OBJECT: u32 = 0x2d2d2d2d; // '----'
+pub const K_EVENT_PARAM_DIRECT_OBJECT: u32 = 0x2d2d2d; // '----'
 pub const TYPE_EVENT_HOT_KEY_ID: u32 = 0x686b6964; // 'hkid'
 
 pub const CMD_KEY: u32 = 256;
 pub const SHIFT_KEY: u32 = 512;
+pub const OPT_KEY: u32 = 2048;
+pub const CTRL_KEY: u32 = 4096;
 
 /// Virtual key codes (kVK_ANSI_*).
 pub const KVK_ANSI_R: u32 = 15;
 pub const KVK_ANSI_E: u32 = 14;
 pub const KVK_ANSI_S: u32 = 1;
 pub const KVK_ANSI_A: u32 = 0;
+
+pub const KVK_DELETE: u16 = 51;
+pub const KVK_ESCAPE: u16 = 53;
 
 static HANDLER: Mutex<Option<EventHandlerRef>> = Mutex::new(None);
 static KEYS: Mutex<Vec<EventHotKeyRef>> = Mutex::new(Vec::new());
@@ -88,8 +97,196 @@ unsafe extern "C" {
 pub type EventHandlerProcPtr =
     unsafe extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> OSStatus;
 
-/// Registers `Cmd+Shift+R` (full screen) and `Cmd+Shift+E` (region).
-pub fn register_defaults() -> Result<(), String> {
+/// 一个全局快捷键：虚拟键码 + Carbon 修饰键。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hotkey {
+    pub key_code: u32,
+    pub modifiers: u32,
+}
+
+impl Hotkey {
+    /// 键码取这个值表示「没设快捷键」。
+    pub const NONE: u32 = u32::MAX;
+
+    pub fn none() -> Self {
+        Self {
+            key_code: Self::NONE,
+            modifiers: 0,
+        }
+    }
+
+    pub fn is_none(self) -> bool {
+        self.key_code == Self::NONE
+    }
+
+    /// 至少要带 ⌘ / ⌥ / ⌃ 之一：纯字母会把正常打字挡住，⇧ 也一样容易误触。
+    pub fn valid(self) -> bool {
+        !self.is_none() && self.modifiers & (CMD_KEY | OPT_KEY | CTRL_KEY) != 0
+    }
+
+    /// 显示成 `⇧⌘R` 这样的样子（顺序 ⌃⌥⇧⌘，和 macOS 一致）。
+    pub fn display(self) -> String {
+        if self.is_none() {
+            return "未设置".to_string();
+        }
+        let mut out = String::new();
+        if self.modifiers & CTRL_KEY != 0 {
+            out.push('⌃');
+        }
+        if self.modifiers & OPT_KEY != 0 {
+            out.push('⌥');
+        }
+        if self.modifiers & SHIFT_KEY != 0 {
+            out.push('⇧');
+        }
+        if self.modifiers & CMD_KEY != 0 {
+            out.push('⌘');
+        }
+        out.push_str(&key_name(self.key_code));
+        out
+    }
+
+    /// 存进 NSUserDefaults 的形式：`修饰键:键码`。
+    pub fn encode(self) -> String {
+        format!("{}:{}", self.modifiers, self.key_code)
+    }
+
+    pub fn decode(text: &str) -> Option<Self> {
+        let (modifiers, key_code) = text.split_once(':')?;
+        Some(Self {
+            key_code: key_code.parse().ok()?,
+            modifiers: modifiers.parse().ok()?,
+        })
+    }
+
+    /// NSEvent 的修饰键位 → Carbon 的修饰键位。
+    pub fn event_modifiers(flags: NSEventModifierFlags) -> u32 {
+        let mut modifiers = 0;
+        if flags.contains(NSEventModifierFlags::Command) {
+            modifiers |= CMD_KEY;
+        }
+        if flags.contains(NSEventModifierFlags::Shift) {
+            modifiers |= SHIFT_KEY;
+        }
+        if flags.contains(NSEventModifierFlags::Option) {
+            modifiers |= OPT_KEY;
+        }
+        if flags.contains(NSEventModifierFlags::Control) {
+            modifiers |= CTRL_KEY;
+        }
+        modifiers
+    }
+}
+
+/// 四个可改的快捷键。slot 就是 Carbon 热键的 id。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hotkeys {
+    pub record_full: Hotkey,
+    pub record_region: Hotkey,
+    pub shot_full: Hotkey,
+    pub shot_region: Hotkey,
+}
+
+pub const SLOT_RECORD_FULL: u32 = 1;
+pub const SLOT_RECORD_REGION: u32 = 2;
+pub const SLOT_SHOT_FULL: u32 = 3;
+pub const SLOT_SHOT_REGION: u32 = 4;
+pub const SLOTS: [u32; 4] = [
+    SLOT_RECORD_FULL,
+    SLOT_RECORD_REGION,
+    SLOT_SHOT_FULL,
+    SLOT_SHOT_REGION,
+];
+
+impl Default for Hotkeys {
+    fn default() -> Self {
+        let cmd_shift = CMD_KEY | SHIFT_KEY;
+        Self {
+            record_full: Hotkey {
+                key_code: KVK_ANSI_R,
+                modifiers: cmd_shift,
+            },
+            record_region: Hotkey {
+                key_code: KVK_ANSI_E,
+                modifiers: cmd_shift,
+            },
+            shot_full: Hotkey {
+                key_code: KVK_ANSI_S,
+                modifiers: cmd_shift,
+            },
+            shot_region: Hotkey {
+                key_code: KVK_ANSI_A,
+                modifiers: cmd_shift,
+            },
+        }
+    }
+}
+
+impl Hotkeys {
+    pub fn get(self, slot: u32) -> Hotkey {
+        match slot {
+            SLOT_RECORD_REGION => self.record_region,
+            SLOT_SHOT_FULL => self.shot_full,
+            SLOT_SHOT_REGION => self.shot_region,
+            _ => self.record_full,
+        }
+    }
+
+    pub fn set(&mut self, slot: u32, key: Hotkey) {
+        match slot {
+            SLOT_RECORD_REGION => self.record_region = key,
+            SLOT_SHOT_FULL => self.shot_full = key,
+            SLOT_SHOT_REGION => self.shot_region = key,
+            _ => self.record_full = key,
+        }
+    }
+
+    pub fn label(slot: u32) -> &'static str {
+        match slot {
+            SLOT_RECORD_REGION => "录制（选区）",
+            SLOT_SHOT_FULL => "截图（全屏）",
+            SLOT_SHOT_REGION => "截图（选区）",
+            _ => "录制（全屏）",
+        }
+    }
+
+    /// 同一个组合只留一个位置：新设的生效，原来那个清掉。
+    pub fn clear_conflicts(&mut self, slot: u32, key: Hotkey) {
+        if key.is_none() {
+            return;
+        }
+        for other in SLOTS {
+            if other != slot && self.get(other) == key {
+                self.set(other, Hotkey::none());
+            }
+        }
+    }
+}
+
+/// 按当前设置重新注册四个热键。重复调用会先注销旧的。
+pub fn apply(hotkeys: &Hotkeys) -> Result<(), String> {
+    install_handler()?;
+    unregister_all();
+    let mut failed = None;
+    for slot in SLOTS {
+        let key = hotkeys.get(slot);
+        if !key.valid() {
+            continue;
+        }
+        if let Err(err) = register(key.key_code, key.modifiers, slot) {
+            failed = Some(err);
+        }
+    }
+    match failed {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+fn install_handler() -> Result<(), String> {
+    if HANDLER.lock().unwrap().is_some() {
+        return Ok(());
+    }
     let mut handler_ref: *mut c_void = std::ptr::null_mut();
     let spec = [EventTypeSpec {
         event_class: K_EVENT_CLASS_KEYBOARD,
@@ -109,11 +306,6 @@ pub fn register_defaults() -> Result<(), String> {
         return Err(format!("InstallEventHandler failed: {status}"));
     }
     *HANDLER.lock().unwrap() = Some(EventHandlerRef(handler_ref));
-
-    register(KVK_ANSI_R, CMD_KEY | SHIFT_KEY, 1)?;
-    register(KVK_ANSI_E, CMD_KEY | SHIFT_KEY, 2)?;
-    register(KVK_ANSI_S, CMD_KEY | SHIFT_KEY, 3)?;
-    register(KVK_ANSI_A, CMD_KEY | SHIFT_KEY, 4)?;
     Ok(())
 }
 
@@ -171,12 +363,148 @@ unsafe extern "C" fn hotkey_handler(
     };
     if status == 0 {
         match id.id {
-            1 => push_action(Action::ToggleFull),
-            2 => push_action(Action::PickRegion),
-            3 => push_action(Action::ShotFull),
-            4 => push_action(Action::PickShot),
+            SLOT_RECORD_FULL => push_action(Action::ToggleFull),
+            SLOT_RECORD_REGION => push_action(Action::PickRegion),
+            SLOT_SHOT_FULL => push_action(Action::ShotFull),
+            SLOT_SHOT_REGION => push_action(Action::PickShot),
             _ => {}
         }
     }
     0
+}
+
+/// 虚拟键码 → 显示用的字符。查不到的就显示键码，不至于空白。
+fn key_name(code: u32) -> String {
+    let name = match code {
+        0 => "A",
+        1 => "S",
+        2 => "D",
+        3 => "F",
+        4 => "H",
+        5 => "G",
+        6 => "Z",
+        7 => "X",
+        8 => "C",
+        9 => "V",
+        10 => "§",
+        11 => "B",
+        12 => "Q",
+        13 => "W",
+        14 => "E",
+        15 => "R",
+        16 => "Y",
+        17 => "T",
+        18 => "1",
+        19 => "2",
+        20 => "3",
+        21 => "4",
+        22 => "6",
+        23 => "5",
+        24 => "=",
+        25 => "9",
+        26 => "7",
+        27 => "-",
+        28 => "8",
+        29 => "0",
+        30 => "]",
+        31 => "O",
+        32 => "U",
+        33 => "[",
+        34 => "I",
+        35 => "P",
+        36 => "↩",
+        37 => "L",
+        38 => "J",
+        39 => "'",
+        40 => "K",
+        41 => ";",
+        42 => "\\",
+        43 => ",",
+        44 => "/",
+        45 => "N",
+        46 => "M",
+        47 => ".",
+        48 => "⇥",
+        49 => "␣",
+        50 => "`",
+        51 => "⌫",
+        53 => "⎋",
+        96 => "F5",
+        97 => "F6",
+        98 => "F7",
+        99 => "F3",
+        100 => "F8",
+        101 => "F9",
+        109 => "F10",
+        103 => "F11",
+        105 => "F13",
+        111 => "F12",
+        118 => "F4",
+        119 => "F2",
+        120 => "F1",
+        122 => "F1",
+        123 => "←",
+        124 => "→",
+        125 => "↓",
+        126 => "↑",
+        other => return format!("键 {other}"),
+    };
+    name.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_cmd_shift_resa() {
+        let keys = Hotkeys::default();
+        assert_eq!(keys.record_full.display(), "⇧⌘R");
+        assert_eq!(keys.record_region.display(), "⇧⌘E");
+        assert_eq!(keys.shot_full.display(), "⇧⌘S");
+        assert_eq!(keys.shot_region.display(), "⇧⌘A");
+    }
+
+    #[test]
+    fn encode_decode_round_trip() {
+        let key = Hotkey {
+            key_code: 9, // V
+            modifiers: CMD_KEY | OPT_KEY,
+        };
+        assert_eq!(key.display(), "⌥⌘V");
+        assert_eq!(Hotkey::decode(&key.encode()), Some(key));
+        let none = Hotkey::none();
+        assert_eq!(Hotkey::decode(&none.encode()), Some(none));
+        assert_eq!(none.display(), "未设置");
+    }
+
+    #[test]
+    fn plain_letters_are_rejected() {
+        let plain = Hotkey {
+            key_code: 9,
+            modifiers: 0,
+        };
+        assert!(!plain.valid());
+        let shift_only = Hotkey {
+            key_code: 9,
+            modifiers: SHIFT_KEY,
+        };
+        assert!(!shift_only.valid());
+    }
+
+    #[test]
+    fn conflicts_are_cleared() {
+        let mut keys = Hotkeys::default();
+        // 把「录制（全屏）」设成原本「录制（选区）」的 ⇧⌘E。
+        let key = Hotkey {
+            key_code: KVK_ANSI_E,
+            modifiers: CMD_KEY | SHIFT_KEY,
+        };
+        keys.set(SLOT_RECORD_FULL, key);
+        keys.clear_conflicts(SLOT_RECORD_FULL, key);
+        assert_eq!(keys.record_full, key);
+        assert_eq!(keys.record_region, Hotkey::none());
+        // 不冲突的位置不受影响。
+        assert_eq!(keys.shot_full.display(), "⇧⌘S");
+    }
 }

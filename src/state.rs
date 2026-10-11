@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::hotkey::{Hotkey, Hotkeys, SLOTS};
 use crate::recorder::Recorder;
 
 /// Commands queued from the menu bar, global hotkeys and the region picker.
@@ -25,6 +26,8 @@ pub enum Action {
     ShotRegion(Rect),
     /// Open a saved image in the system Markup editor.
     Markup(PathBuf),
+    /// 把某个动作的快捷键改成 key（slot 见 `hotkey::SLOTS`）。
+    SetHotkey { slot: u32, key: Hotkey },
     /// 手动检查更新（菜单「检查更新…」）。
     CheckUpdate,
     /// 后台查到新版本：tag（如 `v0.1.4`）和是否由手动检查触发。
@@ -148,6 +151,8 @@ pub struct Settings {
     pub markup: bool,
     /// 启动后自动检查一次更新（之后每 24 小时一次）。
     pub update_check: bool,
+    /// 四个动作的全局快捷键，可以自己改。
+    pub hotkeys: Hotkeys,
 }
 
 impl Default for Settings {
@@ -163,6 +168,7 @@ impl Default for Settings {
             line_hover: true,
             markup: true,
             update_check: true,
+            hotkeys: Hotkeys::default(),
         }
     }
 }
@@ -177,6 +183,7 @@ const KEY_LINE: &str = "line";
 const KEY_LINE_HOVER: &str = "lineHover";
 const KEY_MARKUP: &str = "markup";
 const KEY_UPDATE_CHECK: &str = "updateCheck";
+const KEY_HOTKEYS: [&str; 4] = ["hotkey1", "hotkey2", "hotkey3", "hotkey4"];
 
 pub fn load_persisted(settings: &mut Settings) {
     use objc2_foundation::{NSUserDefaults, NSString};
@@ -222,6 +229,15 @@ pub fn load_persisted(settings: &mut Settings) {
     {
         settings.update_check = defaults.boolForKey(&NSString::from_str(KEY_UPDATE_CHECK));
     }
+    for (index, slot) in SLOTS.iter().enumerate() {
+        let key = NSString::from_str(KEY_HOTKEYS[index]);
+        let Some(text) = defaults.stringForKey(&key) else { continue };
+        let Some(hotkey) = Hotkey::decode(&text.to_string()) else { continue };
+        // 存过的才认：没存过时保持默认值，别被空值洗掉。
+        if hotkey.is_none() || hotkey.valid() {
+            settings.hotkeys.set(*slot, hotkey);
+        }
+    }
 }
 
 pub fn persist(settings: &Settings) {
@@ -253,6 +269,13 @@ pub fn persist(settings: &Settings) {
         settings.update_check,
         &NSString::from_str(KEY_UPDATE_CHECK),
     );
+    for (index, slot) in SLOTS.iter().enumerate() {
+        let value = NSString::from_str(&settings.hotkeys.get(*slot).encode());
+        unsafe {
+            let object: &AnyObject = &*(&*value as *const NSString as *const AnyObject);
+            defaults.setObject_forKey(Some(object), &NSString::from_str(KEY_HOTKEYS[index]));
+        }
+    }
 }
 
 pub struct AppState {

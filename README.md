@@ -21,6 +21,7 @@ Project page: <https://nowszhao.github.io/iRec/>
 - **Quiet by default** — no Dock icon, no window on launch, everything in the status menu.
 - **Never in the shot** — the control window, selection frame and the line use
   `NSWindowSharingType::None`, and the line tucks away while recording.
+- **Configurable hotkeys** — rebind any of the four shortcuts in the hotkey settings.
 - **Auto-update** — checks GitHub Releases on its own and swaps `iRec.app` on request.
 - **Command line** — `iRec --shot`, `iRec --update`, `iRec --selftest`.
 
@@ -78,6 +79,10 @@ Pushing a `v*` tag makes GitHub Actions build both architectures and publish the
 Click the menu bar item for recording, audio, quality, save location, the line and
 permission checks. "Open control window…" brings up the same controls in a window; closing
 it only hides it.
+
+Open **Hotkeys…** from the menu (or the control window) to rebind any of them: press the
+new combination, `⌫` clears one and `Esc` cancels. A shortcut needs `⌘`, `⌥` or `⌃`, and
+one combination is kept for a single action only.
 
 Selecting a region leaves a frame on screen with its own control bar: drag the bar to
 move it, drag the grip to resize it, and use **Screenshot** or **Start recording** there.
@@ -184,7 +189,6 @@ writes out whatever is in progress.
 
 - Only the main display is recorded.
 - Release bundles are not notarised.
-- Hotkeys are fixed (`register_defaults` in `src/hotkey.rs`).
 - Changing the region during a recording applies to the next one.
 - If a drop destination moves the file, the card keeps pointing at the old path.
 

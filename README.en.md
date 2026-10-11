@@ -192,13 +192,20 @@ recording, and the control bar shows a hint for that.
 After a screenshot (or from the "Annotate" button on an image card, or "Annotate latest
 screenshot…" in the menu) the annotation window opens:
 
+One row of icons along the bottom: **Select** (the default), arrow, box, text, then four
+colours, then undo, cancel and done (`⌘↩`).
+
 | Control | What it does |
 | :-- | :-- |
-| Arrow | Drag out a line; it becomes an arrow on release |
-| Box | Drag out a rectangle |
+| Arrow / Box | Drag out a line or a rectangle; the tool returns to Select so you can move it |
 | Text | Click on the image, type, press Return to confirm |
-| Undo / `⌘Z` | Removes the last annotation |
-| Done / Cancel / `Esc` | Saves over the original PNG (the line's thumbnail updates at once) / discards |
+| Select | Click a mark to select it (dashed outline), then drag to move it |
+| Colour | With a mark selected, a click recolours it |
+| `⌫` / Undo | Deletes the selected mark / the last one |
+| Done `⌘↩` / Cancel `Esc` | Saves over the original PNG (thumbnail updates at once) / discards |
+
+The canvas is dimmed with the image on a soft shadow and the bar is icon-only, following the
+editors in CleanShot and Snipaste.
 
 macOS' own Markup is registered as a sharing service and will not come up on many machines,
 so iRec ships its own. Saving writes back over the file, keeping its size and resolution.

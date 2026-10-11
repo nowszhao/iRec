@@ -1,8 +1,9 @@
 # iRec
 
-A menu-bar screen recorder for macOS, written in Rust. Full-screen or region capture
-with optional system audio, encoded as HEVC + AAC in an `.mp4` container and saved to
-the desktop by default.
+A menu-bar screen recorder and screenshot tool for macOS, written in Rust.
+Full-screen / region recording, screenshots with built-in annotation, optional system
+audio: recordings are HEVC + AAC `.mp4`, screenshots are PNG, both saved to the
+desktop by default.
 
 [简体中文](./README.md) | English
 

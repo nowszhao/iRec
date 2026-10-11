@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>iRec — macOS 菜单栏里的屏幕录制工具</title>
-<meta name="description" content="iRec 是 macOS 菜单栏常驻的屏幕录制工具：⇧⌘R 全屏、⇧⌘E 选区，HEVC + AAC 小体积 MP4；还能截图、画箭头框图、自动更新。录完的东西挂在菜单栏下面的一根绳子上，随取随用。">
+<title>iRec — macOS 菜单栏里的录屏与截图工具</title>
+<meta name="description" content="iRec 是 macOS 菜单栏常驻的录屏与截图工具：⇧⌘R 录全屏、⇧⌘E 录选区，⇧⌘S / ⇧⌘A 截图，截完还能直接标注。录完截完的东西挂在菜单栏下面，拖走就用。">
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
@@ -15,10 +15,8 @@
     <span class="brand-name">iRec</span>
   </a>
   <nav class="nav-links" aria-label="页面导航">
-    <a href="#features">特性</a>
+    <a href="#does">能做什么</a>
     <a href="#line">晾衣绳</a>
-    <a href="#shot">截图与标注</a>
-    <a href="#shortcuts">快捷键</a>
     <a href="#download">下载</a>
     <a href="#faq">常见问题</a>
   </nav>
@@ -30,7 +28,6 @@
 
 <main id="top">
 
-  <!-- Hero：菜单栏那根绳子是真的能放的，指针移上去试试 -->
   <section class="hero">
     <div class="menubar" id="menubar" role="img" aria-label="模拟 macOS 菜单栏：指针停留即放下晾衣绳">
       <span class="mb-apple" aria-hidden="true"></span>
@@ -62,18 +59,17 @@
     </div>
 
     <div class="hero-copy">
-      <p class="eyebrow">macOS 13+ · 免费开源（MIT）· v0.1.4</p>
+      <p class="eyebrow">录屏 · 截图 · 标注 · 自动更新</p>
       <h1>iRec</h1>
-      <p class="tagline">菜单栏里的屏幕录制工具。⇧⌘R 全屏、⇧⌘E 选区，录完的视频不躺在文件夹里吃灰——它挂在菜单栏下面的一根绳子上，随取随用。</p>
+      <p class="tagline">macOS 菜单栏里的录屏与截图工具。录完、截完的东西挂在菜单栏下面，拖走就用。</p>
       <div class="hero-actions">
         <a class="btn btn-primary" href="https://github.com/nowszhao/iRec/releases/download/v0.1.4/iRec-0.1.4-arm64.zip">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
           下载 · Apple Silicon
         </a>
         <a class="btn btn-secondary" href="https://github.com/nowszhao/iRec/releases/download/v0.1.4/iRec-0.1.4-x86_64.zip">Intel 版</a>
-        <a class="btn btn-quiet" href="#download">校验与安装说明</a>
       </div>
-      <p class="hero-note">Rust + ScreenCaptureKit 编写 · HEVC 硬件编码 · 支持自动更新 · 无 Dock 图标、启动不弹窗</p>
+      <p class="hero-note">v0.1.4 · macOS 13+ · 免费开源（MIT）· Rust + ScreenCaptureKit</p>
     </div>
 
     <p class="hero-hint">把指针移到上面那根菜单栏试试 ↓</p>
@@ -81,52 +77,28 @@
 
   <section class="strip">
     <div class="strip-inner">
-      <div><strong>一键</strong>⇧⌘R 全屏 / ⇧⌘E 选区</div>
-      <div><strong>小体积</strong>HEVC + AAC 的 MP4</div>
-      <div><strong>截图 + 标注</strong>箭头、框图、文字</div>
+      <div><strong>录屏</strong>⇧⌘R 全屏 / ⇧⌘E 选区</div>
+      <div><strong>截图</strong>⇧⌘S 全屏 / ⇧⌘A 选区</div>
+      <div><strong>标注</strong>箭头、框图、文字</div>
       <div><strong>自动更新</strong>新版本点一下就换包</div>
     </div>
   </section>
 
-  <section id="features" class="section">
-    <h2>该有的都在，不该有的不占地方</h2>
-    <p class="section-lead">菜单栏里一个图标搞定录制、截图、标注、画质和权限；自己的窗口不会被录进视频。</p>
-    <div class="grid">
+  <section id="does" class="section">
+    <h2>能做什么</h2>
+    <p class="section-lead">录屏、截图、标注三件事，都在菜单栏那个图标里。</p>
+    <div class="grid three">
       <article class="tile">
-        <h3>全屏 / 选区录制</h3>
-        <p>拖拽框选，松手后选区框留在原地，可以拖动、改大小，控制条上直接开始或截屏。录制中改区域不会让视频跳变，新区域下一次生效。</p>
+        <h3>录屏</h3>
+        <p><code>⇧⌘R</code> 录全屏，<code>⇧⌘E</code> 框选区域；选区框留在原地，可以拖、可以改大小。输出 HEVC + AAC 的 MP4，系统声音与麦克风可选。</p>
       </article>
       <article class="tile">
-        <h3>四档声音</h3>
-        <p>关闭 / 系统声音 / 麦克风 / 系统声音 + 麦克风，各占一条独立音轨；麦克风用 AVAudioEngine 采集 48 kHz 立体声。</p>
+        <h3>截图</h3>
+        <p><code>⇧⌘S</code> 截全屏，<code>⇧⌘A</code> 框选截图（松手即截）；选区控制条上也有「截屏」。存 PNG，自己的窗口不会拍进去。</p>
       </article>
       <article class="tile">
-        <h3>HEVC 硬编，文件很小</h3>
-        <p>YUV420 采样 + 硬件编码，画质、帧率（30 / 60）、分辨率（1x / 2x）都能调，输出 <code>iRec-年月日-时分秒.mp4</code>。</p>
-      </article>
-      <article class="tile">
-        <h3>截图与标注</h3>
-        <p>⇧⌘S 截全屏、⇧⌘A 截选区，存 PNG 后可以直接在 iRec 里画箭头、框图、打字，写回原图尺寸不变。</p>
-      </article>
-      <article class="tile">
-        <h3>晾衣绳</h3>
-        <p>录完的视频和截图挂在菜单栏下面：单击在访达中显示，拖到别的 App 或文件夹就送过去，点叉才下绳。</p>
-      </article>
-      <article class="tile">
-        <h3>不打扰</h3>
-        <p>静默常驻，没有 Dock 图标、启动不弹窗；控制窗口、选区框、晾衣绳都设为 <code>NSWindowSharingType::None</code>，不会入镜。</p>
-      </article>
-      <article class="tile">
-        <h3>自动更新</h3>
-        <p>启动后自己去 GitHub Releases 看一眼，有新版本时菜单栏多一行提示，点一下下载换包重新打开；也可以关掉。</p>
-      </article>
-      <article class="tile">
-        <h3>命令行也能用</h3>
-        <p><code>iRec --shot</code> 直接截图，<code>--region</code> / <code>--scale</code> / <code>--out</code> 可选；<code>--update</code> 查更新，<code>--selftest</code> 做无界面自测。</p>
-      </article>
-      <article class="tile">
-        <h3>设置记得住</h3>
-        <p>保存位置、声音来源、画质、帧率、分辨率都存在 NSUserDefaults 里，重启后照旧。</p>
+        <h3>标注</h3>
+        <p>截完直接在 iRec 里画箭头、框图、打字；选中后能挪位置、改大小、换颜色。<code>⌘↩</code> 写回原图，尺寸不变。</p>
       </article>
     </div>
   </section>
@@ -134,20 +106,16 @@
   <section id="line" class="section dark">
     <div class="dark-inner">
       <div class="col">
-        <h2>录完就挂起来，别再翻文件夹</h2>
-        <p class="section-lead">第一帧加个播放键，用夹子夹着，从你刚录的那块区域飞上来。指针在菜单栏停留 0.25 秒绳子才滑下来，离开 0.5 秒自己收回去；刚录完也会露脸 2.5 秒。</p>
+        <h2>录完截完，都挂在菜单栏下面</h2>
+        <p class="section-lead">指针在菜单栏停留 0.25 秒绳子滑下来，离开 0.5 秒自己收回去；刚录完会露脸 2.5 秒。绳上最多 8 个。</p>
         <table class="rules">
           <tbody>
-            <tr><th>单击卡片</th><td>在访达中显示</td></tr>
-            <tr><th>双击卡片</th><td>用默认播放器打开</td></tr>
-            <tr><th>拖到别的 App</th><td>送一份过去，卡片留在绳上</td></tr>
-            <tr><th>拖到文件夹 / 对话框</th><td>文件留在那儿，卡片照样挂着</td></tr>
-            <tr><th>拖到 Dock 废纸篓</th><td>文件进废纸篓，卡片下绳</td></tr>
-            <tr><th>点叉 / ⌥ + 点叉</th><td>取下卡片；⌥ 会连文件一起丢进废纸篓</td></tr>
+            <tr><th>单击 / 双击</th><td>在访达中显示 / 用默认播放器打开</td></tr>
+            <tr><th>拖到别的 App、文件夹</th><td>送一份过去，卡片照样挂着</td></tr>
+            <tr><th>点叉 / ⌥ + 点叉</th><td>取下卡片；⌥ 连文件一起进废纸篓</td></tr>
           </tbody>
         </table>
-        <p class="fine">卡片只在手动删除或「清空晾衣绳」时离开绳子：拖进文件夹、对话框，甚至文件被别的程序删掉，卡片都照样挂着。绳上最多挂 8 个，多了最旧那个自己掉下去。</p>
-        <p class="fine">动效创意来自 <a href="https://github.com/alejandrobujan/tendedero">Tendedero</a>（MIT）：两端淡出的抛物线绳子、夹上去先甩一下再停住的阻尼弹簧、隔一阵吹过整排卡片的风。iRec 用 AppKit 手绘加自己积分的弹簧复刻了它。</p>
+        <p class="fine">卡片只在手动删除或「清空晾衣绳」时下绳。动效创意来自 <a href="https://github.com/alejandrobujan/tendedero">Tendedero</a>（MIT）。</p>
       </div>
       <div class="col scene-col">
         <div class="mini" id="mini">
@@ -165,73 +133,9 @@
     </div>
   </section>
 
-  <section id="shot" class="section">
-    <h2>截完图，顺手就标完</h2>
-    <p class="section-lead">⇧⌘S 截全屏、⇧⌘A 截选区（没框选过就先框一次，松手即截），框选控制条上也有「截屏」。截完直接进标注，不用再开别的软件。</p>
-    <div class="grid three">
-      <article class="tile">
-        <h3>箭头 / 框图 / 文字</h3>
-        <p>选中后拖一条线、一个矩形，或者点一下打字。画完自动回到选择工具，方便马上挪位置。</p>
-      </article>
-      <article class="tile">
-        <h3>挪得动，改得了大小</h3>
-        <p>点一下标记选中它，拖着走就能挪；拖白色圆点手柄改大小——箭头两头各一个，框图右下角一个，文字右端一个。</p>
-      </article>
-      <article class="tile">
-        <h3>写回原图</h3>
-        <p>⌘↩ 完成即覆盖写回原 PNG，尺寸和分辨率不变，晾衣绳上的缩略图随即更新；Esc 放弃。⌫ 删选中标记，撤销去掉最后一个。</p>
-      </article>
-    </div>
-    <div class="markup-mock" aria-hidden="true">
-      <div class="mm-canvas">
-        <span class="mm-box"></span>
-        <span class="mm-text">这里改一下</span>
-        <svg class="mm-arrow" viewBox="0 0 120 60"><defs><marker id="ah" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#E5484D"/></marker></defs><path d="M8 52 L104 14" stroke="#E5484D" stroke-width="3" fill="none" marker-end="url(#ah)"/></svg>
-      </div>
-      <div class="mm-bar">
-        <span class="mm-tool is-on" title="选择"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 3 7.07 16.97 2.51-7.39 7.39-2.51z"/></svg></span>
-        <span class="mm-tool" title="箭头"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19 19 5"/><path d="M9 5h10v10"/></svg></span>
-        <span class="mm-tool" title="框图"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></span>
-        <span class="mm-tool" title="文字"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5h16v2"/><path d="M12 5v14"/><path d="M9 19h6"/></svg></span>
-        <span class="mm-sep"></span>
-        <span class="mm-color is-on" style="--c:#E5484D"></span>
-        <span class="mm-color" style="--c:#F5A524"></span>
-        <span class="mm-color" style="--c:#0FA47F"></span>
-        <span class="mm-color" style="--c:#3B82F6"></span>
-        <span class="mm-sep"></span>
-        <span class="mm-tool" title="撤销"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-6.4L3 9"/></svg></span>
-        <span class="mm-tool mm-done" title="完成">完成</span>
-      </div>
-    </div>
-  </section>
-
-  <section id="shortcuts" class="section alt">
-    <h2>快捷键与命令行</h2>
-    <div class="two-col">
-      <div>
-        <table class="keys">
-          <tbody>
-            <tr><th><kbd>⇧</kbd><kbd>⌘</kbd><kbd>R</kbd></th><td>开始 / 停止全屏录制</td></tr>
-            <tr><th><kbd>⇧</kbd><kbd>⌘</kbd><kbd>E</kbd></th><td>进入区域框选；录制中按一次停止</td></tr>
-            <tr><th><kbd>⇧</kbd><kbd>⌘</kbd><kbd>S</kbd></th><td>截取全屏</td></tr>
-            <tr><th><kbd>⇧</kbd><kbd>⌘</kbd><kbd>A</kbd></th><td>进入区域框选，松手即截图</td></tr>
-            <tr><th><kbd>⌘</kbd><kbd>Q</kbd></th><td>退出（退出前会先写完当前文件）</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div>
-        <pre class="code"><code>iRec --shot                      # 截一张全屏
-iRec --shot --region 0,0,1280,800 --scale 2
-iRec --update                    # 检查并更新
-iRec --selftest --seconds 5      # 无界面自测</code></pre>
-        <p class="fine">命令行走的是同一套代码：<code>--shot</code> 存 PNG 到保存位置，<code>--update</code> 从 GitHub Releases 拉对应芯片的包换掉自己。</p>
-      </div>
-    </div>
-  </section>
-
   <section id="download" class="section">
     <h2>下载</h2>
-    <p class="section-lead">当前版本 <strong>v0.1.4</strong>，需要 macOS 13.0 及以上。不确定芯片就先在终端执行 <code>uname -m</code>。</p>
+    <p class="section-lead">当前版本 <strong>v0.1.4</strong>，需要 macOS 13.0 及以上。不确定芯片就先执行 <code>uname -m</code>。</p>
     <div class="downloads">
       <a class="dl" href="https://github.com/nowszhao/iRec/releases/download/v0.1.4/iRec-0.1.4-arm64.zip">
         <span class="dl-arch">Apple Silicon</span>
@@ -244,46 +148,48 @@ iRec --selftest --seconds 5      # 无界面自测</code></pre>
         <span class="dl-note">x86_64 Mac</span>
       </a>
     </div>
-    <ol class="steps">
-      <li>解压后把 <code>iRec.app</code> 拖进「应用程序」。</li>
-      <li>首次打开若被 Gatekeeper 拦住：Finder 里<strong>右键 → 打开</strong>，或执行 <code>xattr -dr com.apple.quarantine /Applications/iRec.app</code>。</li>
-      <li>第一次录制时按提示给「屏幕录制」权限；若设置里已勾选却仍录不了，用菜单里的「申请 / 检查屏幕录制权限」，弹窗第一个按钮就是重启 iRec。</li>
-    </ol>
-    <p class="fine">包是 ad-hoc 签名（CI 里没配 Developer ID），所以没有公证，跨机器分发需要上面那一步解除隔离属性；每次换包签名身份都会变，屏幕录制权限可能要重新授权一次。校验用同目录下的 <code>SHA256SUMS</code>。已经装了旧版本？不用手动下——打开 iRec，菜单栏会提示新版本，点一下就自动换包。</p>
+    <div class="two-col">
+      <div>
+        <table class="keys">
+          <tbody>
+            <tr><th><kbd>⇧</kbd><kbd>⌘</kbd><kbd>R</kbd></th><td>开始 / 停止全屏录制</td></tr>
+            <tr><th><kbd>⇧</kbd><kbd>⌘</kbd><kbd>E</kbd></th><td>框选区域录制</td></tr>
+            <tr><th><kbd>⇧</kbd><kbd>⌘</kbd><kbd>S</kbd></th><td>截取全屏</td></tr>
+            <tr><th><kbd>⇧</kbd><kbd>⌘</kbd><kbd>A</kbd></th><td>框选截图，松手即截</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <ol class="steps">
+          <li>解压后把 <code>iRec.app</code> 拖进「应用程序」。</li>
+          <li>被 Gatekeeper 拦住就<strong>右键 → 打开</strong>，或执行 <code>xattr -dr com.apple.quarantine /Applications/iRec.app</code>。</li>
+          <li>第一次录制时给「屏幕录制」权限；已勾选却录不了，用菜单里的重启按钮。</li>
+        </ol>
+        <p class="fine">包是 ad-hoc 签名、未公证，换包后权限可能要重新授权一次；校验用 <code>SHA256SUMS</code>。装了旧版本不用手动下——iRec 会提示新版本。命令行：<code>iRec --shot</code> 截图、<code>iRec --update</code> 查更新。</p>
+      </div>
+    </div>
   </section>
 
   <section id="faq" class="section alt">
     <h2>常见问题</h2>
     <div class="faq">
       <details open>
-        <summary>设置里已经勾了屏幕录制权限，为什么还是录不了？</summary>
-        <p>macOS 的授权只对<strong>之后启动的进程</strong>生效，勾完要完全退出再打开一次。另外开关里可能记着上一个签名（重新编译或换包后很常见）：去系统设置把 iRec 的开关关掉再打开一次，列表里有多条就全部打开。菜单里的「申请 / 检查屏幕录制权限」会给出结论，弹窗第一个按钮就是「重新启动 iRec」。</p>
+        <summary>权限已经勾选了，为什么还是录不了？</summary>
+        <p>授权只对之后启动的进程生效，勾完要完全退出再打开一次；开关里可能记着上一个签名，关掉再打开一次。菜单里「申请 / 检查屏幕录制权限」的第一个按钮就是重启 iRec。</p>
       </details>
       <details>
-        <summary>为什么每次更新或重新编译都要重新授权？</summary>
-        <p>默认打包是 ad-hoc 签名，每次构建都是新的代码身份，系统会当成新 app。用固定的开发者证书签名就不会失效：<code>SIGN_IDENTITY="Developer ID Application: …" ./scripts/build_app.sh</code>，TeamIdentifier 稳定后授权一直有效。</p>
+        <summary>为什么每次更新都要重新授权？</summary>
+        <p>默认打包是 ad-hoc 签名，每次换包都是新的代码身份。用固定的开发者证书签名就不会失效：<code>SIGN_IDENTITY="Developer ID Application: …" ./scripts/build_app.sh</code>。</p>
       </details>
       <details>
-        <summary>录屏会把我自己的窗口录进去吗？</summary>
-        <p>不会。控制窗口、选区框和晾衣绳窗口都设为 <code>NSWindowSharingType::None</code>；录制期间晾衣绳还会自动收起来，不挡视线。</p>
-      </details>
-      <details>
-        <summary>录好的文件存在哪？</summary>
-        <p>默认 <code>~/Desktop</code>，文件名 <code>iRec-年月日-时分秒.mp4</code>，截图是 <code>iRec-shot-年月日-时分秒.png</code>。菜单栏「选择保存位置…」可以改，设置会持久化。</p>
-      </details>
-      <details>
-        <summary>系统自带的 Markup 不能用吗？</summary>
-        <p>Markup 是注册在分享服务里的，不少机器上拉不起来，所以 iRec 自己做了一套标注：箭头、框图、文字、四种颜色，选中后能挪能改大小，⌘↩ 写回原图。</p>
-      </details>
-      <details>
-        <summary>它一直在后台跑吗？</summary>
-        <p>是的，但很安静：只在菜单栏显示一个图标，没有 Dock 图标、启动不弹窗。退出用菜单里的「退出」。自动更新默认启动后静默查一次、之后每 24 小时一次，也可以关掉。</p>
+        <summary>文件存哪？会不会把自己的窗口录进去？</summary>
+        <p>默认存桌面，<code>iRec-年月日-时分秒.mp4</code> / <code>iRec-shot-年月日-时分秒.png</code>，菜单栏「选择保存位置…」可改。控制窗口、选区框和晾衣绳都设为 <code>NSWindowSharingType::None</code>，不会入镜。</p>
       </details>
     </div>
   </section>
 
   <section class="cta">
-    <h2>装一个，下次录屏就顺手了</h2>
+    <h2>装一个，录屏截图就顺手了</h2>
     <div class="hero-actions">
       <a class="btn btn-primary" href="https://github.com/nowszhao/iRec/releases/latest">去 Releases 下载</a>
       <a class="btn btn-secondary" href="https://github.com/nowszhao/iRec">看源码</a>

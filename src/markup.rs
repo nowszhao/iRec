@@ -820,8 +820,8 @@ define_class!(
             mark.fill();
             let color = self.ivars().color.get();
             let ring = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                NSPoint::new(178.0 + color as f64 * 28.0 - 1.0, 9.0),
-                NSSize::new(26.0, 26.0),
+                NSPoint::new(178.0 + color as f64 * 28.0 + 1.0, 11.0),
+                NSSize::new(22.0, 22.0),
             ));
             ring.setLineWidth(2.0);
             NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.95).setStroke();
@@ -967,40 +967,26 @@ fn icon_button(
 }
 
 /// 颜色按钮：一个小圆点，选中的外面多一圈。
+/// 颜色按钮：只画一个色点。选中时那圈白环由工具条统一画，免得两处各画一圈。
 fn color_button(
     mtm: MainThreadMarker,
     index: usize,
-    selected: bool,
     frame: NSRect,
     target: &CanvasView,
 ) -> Retained<NSButton> {
     let (r, g, b) = COLORS[index];
-    let size = 22.0;
     let image = {
         let block = RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
             let dot = NSRect::new(
-                NSPoint::new(rect.origin.x + 3.0, rect.origin.y + 3.0),
-                NSSize::new(rect.size.width - 6.0, rect.size.height - 6.0),
+                NSPoint::new(rect.origin.x + 2.0, rect.origin.y + 2.0),
+                NSSize::new(rect.size.width - 4.0, rect.size.height - 4.0),
             );
             let path = NSBezierPath::bezierPathWithOvalInRect(dot);
             NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0).setFill();
             path.fill();
-            if selected {
-                let ring = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                    NSPoint::new(rect.origin.x + 0.5, rect.origin.y + 0.5),
-                    NSSize::new(rect.size.width - 1.0, rect.size.height - 1.0),
-                ));
-                ring.setLineWidth(1.5);
-                NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.9).setStroke();
-                ring.stroke();
-            }
             objc2::runtime::Bool::YES
         });
-        NSImage::imageWithSize_flipped_drawingHandler(
-            NSSize::new(size, size),
-            false,
-            &block,
-        )
+        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(22.0, 22.0), false, &block)
     };
     let button = unsafe { NSButton::initWithFrame(NSButton::alloc(mtm), frame) };
     button.setImage(Some(&image));
@@ -1221,7 +1207,6 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
         bar.addSubview(&color_button(
             mtm,
             index,
-            index == 0,
             NSRect::new(
                 NSPoint::new(178.0 + index as f64 * 28.0, 11.0),
                 NSSize::new(24.0, 24.0),

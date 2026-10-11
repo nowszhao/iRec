@@ -25,6 +25,24 @@ pub enum Action {
     ShotRegion(Rect),
     /// Open a saved image in the system Markup editor.
     Markup(PathBuf),
+    /// 手动检查更新（菜单「检查更新…」）。
+    CheckUpdate,
+    /// 后台查到新版本：tag（如 `v0.1.4`）和是否由手动检查触发。
+    UpdateFound(String, bool),
+    /// 更新相关的弹窗提示（失败 / 已是最新），弹完就收起那一行。
+    UpdateAlert(String),
+    /// 新版本已下载解压好，参数是暂存的 iRec.app 路径。
+    UpdateReady(PathBuf),
+}
+
+/// 自动更新的进展。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Update {
+    /// 查到的新版本 tag；None 表示只在显示一条提示（比如下载中）。
+    pub tag: Option<String>,
+    pub message: Option<String>,
+    /// 正在检查 / 下载 / 安装。
+    pub busy: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -128,6 +146,8 @@ pub struct Settings {
     pub line_hover: bool,
     /// 截完图是否直接打开系统标注。
     pub markup: bool,
+    /// 启动后自动检查一次更新（之后每 24 小时一次）。
+    pub update_check: bool,
 }
 
 impl Default for Settings {
@@ -142,6 +162,7 @@ impl Default for Settings {
             line: true,
             line_hover: true,
             markup: true,
+            update_check: true,
         }
     }
 }
@@ -155,6 +176,7 @@ const KEY_SCALE: &str = "scale";
 const KEY_LINE: &str = "line";
 const KEY_LINE_HOVER: &str = "lineHover";
 const KEY_MARKUP: &str = "markup";
+const KEY_UPDATE_CHECK: &str = "updateCheck";
 
 pub fn load_persisted(settings: &mut Settings) {
     use objc2_foundation::{NSUserDefaults, NSString};
@@ -194,6 +216,12 @@ pub fn load_persisted(settings: &mut Settings) {
     if defaults.objectForKey(&NSString::from_str(KEY_MARKUP)).is_some() {
         settings.markup = defaults.boolForKey(&NSString::from_str(KEY_MARKUP));
     }
+    if defaults
+        .objectForKey(&NSString::from_str(KEY_UPDATE_CHECK))
+        .is_some()
+    {
+        settings.update_check = defaults.boolForKey(&NSString::from_str(KEY_UPDATE_CHECK));
+    }
 }
 
 pub fn persist(settings: &Settings) {
@@ -218,6 +246,13 @@ pub fn persist(settings: &Settings) {
     defaults.setInteger_forKey(quality, &NSString::from_str(KEY_QUALITY));
     defaults.setInteger_forKey(settings.fps as isize, &NSString::from_str(KEY_FPS));
     defaults.setDouble_forKey(settings.scale, &NSString::from_str(KEY_SCALE));
+    defaults.setBool_forKey(settings.line, &NSString::from_str(KEY_LINE));
+    defaults.setBool_forKey(settings.line_hover, &NSString::from_str(KEY_LINE_HOVER));
+    defaults.setBool_forKey(settings.markup, &NSString::from_str(KEY_MARKUP));
+    defaults.setBool_forKey(
+        settings.update_check,
+        &NSString::from_str(KEY_UPDATE_CHECK),
+    );
 }
 
 pub struct AppState {
@@ -236,6 +271,12 @@ pub struct AppState {
     pub last_error: Option<String>,
     /// 上一次开始录制被 macOS 的权限挡住了：提示和状态行都按这个走。
     pub permission_blocked: bool,
+    /// 自动更新的进展（有新版本 / 正在下载 / 失败原因）。
+    pub update: Option<Update>,
+    /// 上次检查更新的时刻。
+    pub update_checked_at: Option<Instant>,
+    /// 启动时刻：用来把首次自动检查推迟几秒，别和启动抢资源。
+    pub launched_at: Instant,
 }
 
 impl Default for AppState {
@@ -251,6 +292,9 @@ impl Default for AppState {
             saved_at: None,
             last_error: None,
             permission_blocked: false,
+            update: None,
+            update_checked_at: None,
+            launched_at: Instant::now(),
         }
     }
 }

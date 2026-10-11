@@ -11,6 +11,7 @@ the desktop by default.
 - [Features](#features)
 - [Requirements](#requirements)
 - [Install & Build](#install--build)
+- [Auto-update](#auto-update)
 - [Usage](#usage)
   - [Control window](#control-window)
   - [Global hotkeys](#global-hotkeys)
@@ -63,9 +64,24 @@ Grab the package that matches your Mac from
 If unsure, run `uname -m`: `arm64` means Apple Silicon, `x86_64` means Intel.
 Unzip and drag `iRec.app` into Applications.
 
-From v0.1.1 the bundles are Developer ID signed and notarised. If a package is
-unsigned, Gatekeeper may block the first launch: right-click → Open, or run
+The published bundles are ad-hoc signed (no Developer ID is configured in CI),
+so Gatekeeper may block the first launch: right-click → Open, or run
 `xattr -dr com.apple.quarantine /Applications/iRec.app`.
+
+## Auto-update
+
+iRec checks GitHub Releases for a newer version on its own:
+
+- One silent check 5 seconds after launch, then once every 24 hours; "Check for
+  updates…" in the menu bar does it on demand
+- When a newer version exists the menu bar shows "↑ New version v0.1.x, click to
+  update": clicking downloads the matching package, swaps `iRec.app` and relaunches
+- Turn the automatic check off with "Check for updates on launch"
+- From the shell: `iRec --update`
+- Only the running `iRec.app` is replaced; without write permission iRec asks you
+  to download manually
+- The bundle signature changes after an update, so Screen Recording may need to be
+  granted again
 
 ## Install & Build
 

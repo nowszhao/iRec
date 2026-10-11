@@ -9,6 +9,7 @@ mod overlay;
 mod recorder;
 mod shot;
 mod state;
+mod update;
 
 use std::cell::{OnceCell, RefCell};
 use std::path::{Path, PathBuf};
@@ -36,7 +37,7 @@ use crate::overlay::pick_region;
 use crate::recorder::Recorder;
 use crate::state::{
     dirs_desktop, init_state, load_persisted, log, persist, push_action, with_state, Action,
-    AppState, AudioSource, Quality, Rect, Settings, STATE,
+    AppState, AudioSource, Quality, Rect, Settings, Update, STATE,
 };
 
 #[derive(Default)]
@@ -62,6 +63,8 @@ struct AppIvars {
     line_enable_item: OnceCell<Retained<NSMenuItem>>,
     annotate_item: OnceCell<Retained<NSMenuItem>>,
     markup_item: OnceCell<Retained<NSMenuItem>>,
+    update_item: OnceCell<Retained<NSMenuItem>>,
+    update_check_item: OnceCell<Retained<NSMenuItem>>,
 }
 
 define_class!(
@@ -120,6 +123,7 @@ define_class!(
                 with_state(|s| s.last_error = Some(err));
                 self.finish();
             }
+            self.maybe_auto_check_update();
             self.refresh_status();
             self.refresh_menu();
             self.update_window();
@@ -169,6 +173,24 @@ define_class!(
         fn toggle_markup(&self, _sender: &AnyObject) {
             with_state(|s| {
                 s.settings.markup = !s.settings.markup;
+                persist(&s.settings);
+            });
+        }
+
+        #[unsafe(method(checkUpdate:))]
+        fn check_update_action(&self, _sender: &AnyObject) {
+            push_action(Action::CheckUpdate);
+        }
+
+        #[unsafe(method(installUpdate:))]
+        fn install_update_action(&self, _sender: &AnyObject) {
+            self.install_update();
+        }
+
+        #[unsafe(method(toggleUpdateCheck:))]
+        fn toggle_update_check(&self, _sender: &AnyObject) {
+            with_state(|s| {
+                s.settings.update_check = !s.settings.update_check;
                 persist(&s.settings);
             });
         }
@@ -772,6 +794,24 @@ impl AppDelegate {
         menu.addItem(&permission);
         self.ivars().last_file.set(reveal).ok();
 
+        let update_item = menu_item(mtm, "↑ 发现新版本，点此更新", Some(sel!(installUpdate:)), self, 0);
+        update_item.setHidden(true);
+        menu.addItem(&update_item);
+        self.ivars().update_item.set(update_item).ok();
+
+        let check_update = menu_item(mtm, "检查更新…", Some(sel!(checkUpdate:)), self, 0);
+        menu.addItem(&check_update);
+
+        let auto_update = menu_item(
+            mtm,
+            "启动时检查更新",
+            Some(sel!(toggleUpdateCheck:)),
+            self,
+            0,
+        );
+        menu.addItem(&auto_update);
+        self.ivars().update_check_item.set(auto_update).ok();
+
         let status_line = menu_item(mtm, "就绪", None, self, 0);
         status_line.setHidden(true);
         menu.addItem(&status_line);
@@ -784,10 +824,22 @@ impl AppDelegate {
         menu
     }
 
+    /// 更新类的动作：不受「正在保存录制」的限制。
+    fn is_update_action(action: &Action) -> bool {
+        matches!(
+            action,
+            Action::CheckUpdate
+                | Action::UpdateFound(..)
+                | Action::UpdateAlert(_)
+                | Action::UpdateReady(_)
+        )
+    }
+
     fn handle(&self, action: Action) {
         let (recording, stopping) = with_state(|s| (s.recorder.is_some(), s.stopping));
-        if stopping {
-            // Still closing the previous file; ignore new commands for now.
+        // Still closing the previous file; ignore new commands for now.
+        // 更新跟录制无关，不受这条限制。
+        if stopping && !Self::is_update_action(&action) {
             return;
         }
         match action {
@@ -836,6 +888,185 @@ impl AppDelegate {
                     line::refresh(path);
                 });
             }
+            Action::CheckUpdate
+            | Action::UpdateFound(..)
+            | Action::UpdateAlert(_)
+            | Action::UpdateReady(_) => self.handle_update(action),
+        }
+    }
+
+    /// 启动几秒后静默查一次，之后每 24 小时一次。
+    fn maybe_auto_check_update(&self) {
+        let (enabled, checked, elapsed) = with_state(|s| {
+            (
+                s.settings.update_check,
+                s.update_checked_at,
+                s.launched_at.elapsed(),
+            )
+        });
+        if !enabled {
+            return;
+        }
+        let due = match checked {
+            // 刚启动先缓一缓，别和启动抢资源。
+            None => elapsed > Duration::from_secs(5),
+            Some(at) => at.elapsed() > Duration::from_secs(24 * 60 * 60),
+        };
+        if due {
+            self.check_update(false);
+        }
+    }
+
+    /// 问 GitHub 有没有新版本。`manual=false` 时只在菜单栏那一行提示，不弹窗打扰。
+    fn check_update(&self, manual: bool) {
+        if with_state(|s| s.update.as_ref().is_some_and(|u| u.busy)) {
+            return;
+        }
+        with_state(|s| {
+            s.update = Some(Update {
+                tag: None,
+                message: Some("正在检查更新…".to_string()),
+                busy: true,
+            });
+            s.update_checked_at = Some(Instant::now());
+        });
+        std::thread::spawn(move || {
+            let done = |s: &mut AppState| {
+                if let Some(update) = s.update.as_mut() {
+                    update.busy = false;
+                }
+            };
+            match update::latest_tag() {
+                Ok(tag) => {
+                    let newer = update::is_newer(&tag, update::current_version());
+                    log(&format!(
+                        "update: latest={tag}, current={}, newer={newer}",
+                        update::current_version()
+                    ));
+                    with_state(done);
+                    if newer {
+                        push_action(Action::UpdateFound(tag, manual));
+                    } else if manual {
+                        push_action(Action::UpdateAlert(format!(
+                            "已经是最新版本（{}）。",
+                            update::current_version()
+                        )));
+                    } else {
+                        with_state(|s| s.update = None);
+                    }
+                }
+                Err(err) => {
+                    log(&format!("update: 检查失败 {err}"));
+                    with_state(done);
+                    if manual {
+                        push_action(Action::UpdateAlert(format!("检查更新失败：{err}")));
+                    } else {
+                        with_state(|s| s.update = None);
+                    }
+                }
+            }
+        });
+    }
+
+    /// 下载新版本，下载完交给主线程换包（换包要在主线程退出自己）。
+    fn install_update(&self) {
+        let tag = with_state(|s| s.update.as_ref().and_then(|u| u.tag.clone()));
+        let Some(tag) = tag else { return };
+        if with_state(|s| s.update.as_ref().is_some_and(|u| u.busy)) {
+            return;
+        }
+        let version = update::strip_tag(&tag);
+        log(&format!("update: 开始下载 {version}"));
+        with_state(|s| {
+            s.update = Some(Update {
+                tag: Some(tag.clone()),
+                message: Some("正在下载更新…".to_string()),
+                busy: true,
+            });
+        });
+        std::thread::spawn(move || match update::download(&version) {
+            Ok(path) => {
+                with_state(|s| {
+                    if let Some(update) = s.update.as_mut() {
+                        update.message = Some("正在安装更新…".to_string());
+                    }
+                });
+                push_action(Action::UpdateReady(path));
+            }
+            Err(err) => {
+                log(&format!("update: 下载失败 {err}"));
+                push_action(Action::UpdateAlert(format!("下载更新失败：{err}")));
+            }
+        });
+    }
+
+    fn handle_update(&self, action: Action) {
+        match action {
+            Action::CheckUpdate => self.check_update(true),
+            Action::UpdateFound(tag, manual) => {
+                log(&format!("update: 发现新版本 {tag}（manual={manual}）"));
+                with_state(|s| {
+                    s.update = Some(Update {
+                        tag: Some(tag.clone()),
+                        message: None,
+                        busy: false,
+                    });
+                });
+                if manual {
+                    let version = update::strip_tag(&tag);
+                    self.show_update_alert(
+                        &format!(
+                            "新版本 {version} 已发布，当前是 {}。\n                             更新会下载对应芯片的包，换掉 iRec.app 后重新打开。",
+                            update::current_version()
+                        ),
+                        true,
+                    );
+                }
+            }
+            Action::UpdateAlert(text) => {
+                with_state(|s| s.update = None);
+                self.show_update_alert(&text, false);
+            }
+            Action::UpdateReady(path) => match update::replace_and_relaunch(&path) {
+                Ok(()) => {
+                    log("update: 换包脚本已就位，退出等它接管");
+                    self.stop_sync_if_recording();
+                    NSApplication::sharedApplication(self.mtm()).terminate(None);
+                }
+                Err(err) => {
+                    log(&format!("update: 换包失败 {err}"));
+                    push_action(Action::UpdateAlert(err));
+                }
+            },
+            _ => {}
+        }
+    }
+
+    /// 更新相关的弹窗。install=true 时第一个按钮是「立即更新」。
+    fn show_update_alert(&self, message: &str, install: bool) {
+        let alert = unsafe { NSAlert::new(self.mtm()) };
+        alert.setMessageText(&NSString::from_str(if install {
+            "发现新版本"
+        } else {
+            "检查更新"
+        }));
+        let text = if install {
+            format!(
+                "{message}\n\n发布包是 ad-hoc 签名，换包后屏幕录制权限可能要重新授权一次。"
+            )
+        } else {
+            message.to_string()
+        };
+        alert.setInformativeText(&NSString::from_str(&text));
+        if install {
+            alert.addButtonWithTitle(&NSString::from_str("立即更新"));
+            alert.addButtonWithTitle(&NSString::from_str("以后再说"));
+        } else {
+            alert.addButtonWithTitle(&NSString::from_str("好"));
+        }
+        let choice = alert.runModal();
+        if install && choice == NSAlertFirstButtonReturn {
+            self.install_update();
         }
     }
 
@@ -1148,6 +1379,32 @@ impl AppDelegate {
         if let Some(item) = self.ivars().annotate_item.get() {
             item.setEnabled(self.latest_shot().is_some());
         }
+        if let Some(item) = self.ivars().update_item.get() {
+            let view = with_state(|s| {
+                s.update.as_ref().map(|u| {
+                    let title = if u.busy {
+                        u.message.clone().unwrap_or_else(|| "正在检查更新…".to_string())
+                    } else if let Some(tag) = &u.tag {
+                        format!("↑ 发现新版本 {tag}，点此更新")
+                    } else {
+                        u.message.clone().unwrap_or_default()
+                    };
+                    // 忙的时候不给点，免得重复触发。
+                    (title, u.tag.is_some() && !u.busy)
+                })
+            });
+            match view {
+                Some((title, actionable)) => {
+                    item.setTitle(&NSString::from_str(&title));
+                    item.setHidden(false);
+                    item.setEnabled(actionable);
+                }
+                None => item.setHidden(true),
+            }
+        }
+        if let Some(item) = self.ivars().update_check_item.get() {
+            item.setState(state_value(with_state(|s| s.settings.update_check)));
+        }
         if let Some(item) = self.ivars().status_line.get() {
             let blocked = with_state(|s| s.permission_blocked);
             if blocked {
@@ -1424,6 +1681,10 @@ fn main() {
         shot_cli(&args);
         return;
     }
+    if args.iter().any(|a| a == "--update") {
+        update_cli();
+        return;
+    }
 
     let mtm = MainThreadMarker::new().expect("irec must start on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -1484,6 +1745,30 @@ fn shot_cli(args: &[String]) {
             println!("FAILED: 等截图结果超时");
             std::process::exit(1);
         }
+    }
+}
+
+/// 命令行检查更新：`irec --update`
+fn update_cli() {
+    println!("当前版本：{}", update::current_version());
+    match update::latest_tag() {
+        Ok(tag) => {
+            println!("最新版本：{tag}");
+            if !update::is_newer(&tag, update::current_version()) {
+                println!("已是最新，不用更新。");
+                return;
+            }
+            let version = update::strip_tag(&tag);
+            println!("下载 {}", update::asset_url(&version));
+            match update::download(&version) {
+                Ok(path) => match update::replace_and_relaunch(&path) {
+                    Ok(()) => println!("已排好换包脚本：iRec 退出后自动换成 {tag} 并重新打开。"),
+                    Err(err) => println!("FAILED: {err}\n手动下载：{}", update::releases_url()),
+                },
+                Err(err) => println!("FAILED: {err}"),
+            }
+        }
+        Err(err) => println!("FAILED: {err}"),
     }
 }
 

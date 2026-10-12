@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use objc2_app_kit::NSEventModifierFlags;
 
-use crate::state::{push_action, Action};
+use crate::state::{log, push_action, Action};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -43,7 +43,9 @@ pub type EventHandlerCallRef = *mut c_void;
 
 pub const K_EVENT_CLASS_KEYBOARD: u32 = 0x6b657962; // 'keyb'
 pub const K_EVENT_HOT_KEY_PRESSED: u32 = 5;
-pub const K_EVENT_PARAM_DIRECT_OBJECT: u32 = 0x2d2d2d; // '----'
+/// `kEventParamDirectObject` = '----'. Four hyphens: the value is a four
+/// character code, and a shorter literal silently matches no parameter.
+pub const K_EVENT_PARAM_DIRECT_OBJECT: u32 = 0x2d2d2d2d; // '----'
 pub const TYPE_EVENT_HOT_KEY_ID: u32 = 0x686b6964; // 'hkid'
 
 pub const CMD_KEY: u32 = 256;
@@ -369,6 +371,9 @@ unsafe extern "C" fn hotkey_handler(
             SLOT_SHOT_REGION => push_action(Action::PickShot),
             _ => {}
         }
+    } else {
+        // 取不到参数说明常量或事件名不对，别让热键静默失效。
+        log(&format!("hotkey: GetEventParameter 失败 status={status}"));
     }
     0
 }
@@ -490,6 +495,14 @@ mod tests {
             modifiers: SHIFT_KEY,
         };
         assert!(!shift_only.valid());
+    }
+
+    #[test]
+    fn carbon_four_char_codes_are_four_bytes() {
+        // 'keyb' / 'hkid' / '----' 都是四字符码，少写一个字节就会查不到参数。
+        assert_eq!(K_EVENT_CLASS_KEYBOARD, u32::from_be_bytes(*b"keyb"));
+        assert_eq!(TYPE_EVENT_HOT_KEY_ID, u32::from_be_bytes(*b"hkid"));
+        assert_eq!(K_EVENT_PARAM_DIRECT_OBJECT, u32::from_be_bytes(*b"----"));
     }
 
     #[test]

@@ -174,6 +174,8 @@ pub struct Settings {
     pub markup: bool,
     /// 启动后自动检查一次更新（之后每 24 小时一次）。
     pub update_check: bool,
+    /// 首次启动是否已经展示过权限引导。
+    pub permissions_prompted: bool,
     /// 四个动作的全局快捷键，可以自己改。
     pub hotkeys: Hotkeys,
 }
@@ -191,6 +193,7 @@ impl Default for Settings {
             line_hover: true,
             markup: true,
             update_check: true,
+            permissions_prompted: false,
             hotkeys: Hotkeys::default(),
         }
     }
@@ -206,14 +209,18 @@ const KEY_LINE: &str = "line";
 const KEY_LINE_HOVER: &str = "lineHover";
 const KEY_MARKUP: &str = "markup";
 const KEY_UPDATE_CHECK: &str = "updateCheck";
+const KEY_PERMISSIONS_PROMPTED: &str = "permissionsPrompted";
 const KEY_HOTKEYS: [&str; 4] = ["hotkey1", "hotkey2", "hotkey3", "hotkey4"];
 
 pub fn load_persisted(settings: &mut Settings) {
     use objc2_foundation::{NSUserDefaults, NSString};
     let defaults = NSUserDefaults::standardUserDefaults();
     if let Some(dir) = defaults.stringForKey(&NSString::from_str(KEY_OUT_DIR)) {
+        // Do not touch the filesystem here: probing Desktop/Documents at
+        // launch triggers a Files and Folders TCC prompt. The writer creates
+        // the folder when it is actually used.
         let path = PathBuf::from(dir.to_string());
-        if path.is_dir() {
+        if !path.as_os_str().is_empty() {
             settings.out_dir = path;
         }
     }
@@ -251,6 +258,13 @@ pub fn load_persisted(settings: &mut Settings) {
         .is_some()
     {
         settings.update_check = defaults.boolForKey(&NSString::from_str(KEY_UPDATE_CHECK));
+    }
+    if defaults
+        .objectForKey(&NSString::from_str(KEY_PERMISSIONS_PROMPTED))
+        .is_some()
+    {
+        settings.permissions_prompted =
+            defaults.boolForKey(&NSString::from_str(KEY_PERMISSIONS_PROMPTED));
     }
     for (index, slot) in SLOTS.iter().enumerate() {
         let key = NSString::from_str(KEY_HOTKEYS[index]);
@@ -291,6 +305,10 @@ pub fn persist(settings: &Settings) {
     defaults.setBool_forKey(
         settings.update_check,
         &NSString::from_str(KEY_UPDATE_CHECK),
+    );
+    defaults.setBool_forKey(
+        settings.permissions_prompted,
+        &NSString::from_str(KEY_PERMISSIONS_PROMPTED),
     );
     for (index, slot) in SLOTS.iter().enumerate() {
         let value = NSString::from_str(&settings.hotkeys.get(*slot).encode());
@@ -387,10 +405,7 @@ pub fn push_action(action: Action) {
 
 pub fn dirs_desktop() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
-        let p = PathBuf::from(home).join("Desktop");
-        if p.is_dir() {
-            return p;
-        }
+        return PathBuf::from(home).join("Desktop");
     }
     PathBuf::from(".")
 }

@@ -6,6 +6,7 @@ mod line;
 mod markup;
 mod mic;
 mod overlay;
+mod permissions;
 mod recorder;
 mod scrollpreview;
 mod scrollshot;
@@ -27,8 +28,8 @@ use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSBackingStoreType, NSBezierPath, NSButton, NSButtonType, NSColor,
     NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSFont, NSImage, NSMenu, NSMenuItem,
-    NSAlertSecondButtonReturn, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSStatusBar,
-    NSStatusItem, NSTextField, NSView, NSWarningAlertStyle, NSWindow, NSWindowStyleMask, NSWorkspace,
+    NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSStatusBar, NSStatusItem, NSTextField, NSView,
+    NSWindow, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
 use objc2_foundation::{
@@ -102,6 +103,7 @@ define_class!(
             line::init(self.mtm());
             let (enabled, hover) = with_state(|s| (s.settings.line, s.settings.line_hover));
             line::apply_settings(enabled, hover);
+            permissions::maybe_show_onboarding(self.mtm());
         }
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
@@ -357,22 +359,7 @@ define_class!(
 
         #[unsafe(method(checkPermission:))]
         fn check_permission(&self, _sender: &AnyObject) {
-            // Asking explicitly shows macOS' own prompt when needed.
-            let granted = crate::recorder::request_permission(true)
-                || unsafe { CGPreflightScreenCaptureAccess() };
-            log(&format!("permission check: preflight={granted}"));
-            if granted {
-                with_state(|s| s.permission_blocked = false);
-                let alert = unsafe { NSAlert::new(self.mtm()) };
-                alert.setMessageText(&NSString::from_str("屏幕录制权限已开启"));
-                alert.setInformativeText(&NSString::from_str(
-                    "可以开始录制了。要是刚才录过一次失败的，完全退出再打开 iRec 就好。",
-                ));
-                alert.addButtonWithTitle(&NSString::from_str("好"));
-                alert.runModal();
-            } else {
-                self.show_permission_alert();
-            }
+            permissions::show(self.mtm());
         }
 
         /// 状态行上的权限提示可以直接点：重启之后授权才对这个进程生效。
@@ -727,7 +714,7 @@ impl AppDelegate {
         content.addSubview(&reveal);
         let permission = make_button(
             mtm,
-            "申请 / 检查权限",
+            "权限设置…",
             sel!(checkPermission:),
             NSRect::new(NSPoint::new(pad + 168.0, y), NSSize::new(inner - 168.0, 30.0)),
             self,
@@ -915,7 +902,7 @@ impl AppDelegate {
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         let permission = menu_item(
             mtm,
-            "申请 / 检查屏幕录制权限",
+            "权限设置…",
             Some(sel!(checkPermission:)),
             self,
             0,
@@ -1482,73 +1469,14 @@ impl AppDelegate {
         window
     }
 
-    /// Opens the Screen Recording pane of System Settings.
-    fn open_settings(&self) {
-        open_screen_capture_settings();
-    }
-
-    /// 屏幕录制权限没生效时的引导。macOS 的授权只对之后启动的进程生效，
-    /// 所以主要动作是「重新启动 iRec」，而不是反复去系统设置。
+    /// 权限没生效时的引导。
     fn show_permission_alert(&self) {
-        let granted = unsafe { CGPreflightScreenCaptureAccess() };
-        let alert = unsafe { NSAlert::new(self.mtm()) };
-        alert.setAlertStyle(NSWarningAlertStyle);
-        if granted {
-            alert.setMessageText(&NSString::from_str("权限已开启，重启 iRec 后生效"));
-            alert.setInformativeText(&NSString::from_str(
-                "macOS 的屏幕录制授权只对之后启动的进程生效，所以要完全退出再打开一次 iRec。\n\
-                 要是重开之后还这样：去系统设置把 iRec 的开关关掉再打开一次——\
-                 开关里可能记着上一个签名（重新编译过就很常见）。",
-            ));
-        } else {
-            alert.setMessageText(&NSString::from_str("屏幕录制权限还没生效"));
-            alert.setInformativeText(&NSString::from_str(
-                "1) 在 系统设置 → 隐私与安全性 → 屏幕录制 里，把 iRec 的开关\
-                 关掉再打开一次：只确认它是开着的不够，开关里可能记着上一个签名\
-                 （重新编译过就很常见）；列表里有多条 iRec 就全部打开。\n\
-                 2) 授权之后要完全退出再打开 iRec——授权只对之后启动的进程生效，\
-                 这也是「设置里已经勾了、这边还是录不了」最常见的原因；\
-                 本弹窗第一个按钮就是「重新启动 iRec」。\n\
-                 3) 如果列表里根本没有 iRec，就先按一次 ⇧⌘R，让系统弹出授权框并选“允许”。\n\
-                 4) 反复失效的话：默认打包是 ad-hoc 签名，每次重建都是新的身份，\
-                 旧的授权会作废；用 SIGN_IDENTITY 签名（见 README）可固定身份。",
-            ));
-        }
-        alert.addButtonWithTitle(&NSString::from_str("重新启动 iRec"));
-        alert.addButtonWithTitle(&NSString::from_str("打开系统设置"));
-        alert.addButtonWithTitle(&NSString::from_str("好"));
-        let choice = alert.runModal();
-        if choice == NSAlertFirstButtonReturn {
-            self.relaunch();
-        } else if choice == NSAlertSecondButtonReturn {
-            self.open_settings();
-        }
+        permissions::show(self.mtm());
     }
 
     /// 退出并重新打开自己：授权改动之后就差这一步。
     fn relaunch(&self) {
-        log("relaunching");
-        let bundle = NSBundle::mainBundle();
-        let app = bundle.bundlePath().to_string();
-        let exe = bundle.executablePath().map(|p| p.to_string());
-        let command = if app.ends_with(".app") {
-            format!("sleep 1; open -n '{}'", shell_quote(&app))
-        } else if let Some(exe) = exe {
-            format!("sleep 1; '{}' >/dev/null 2>&1 &", shell_quote(&exe))
-        } else {
-            return;
-        };
-        if std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(&command)
-            .spawn()
-            .is_err()
-        {
-            log("relaunch: 无法启动重启命令");
-            return;
-        }
-        self.stop_sync_if_recording();
-        NSApplication::sharedApplication(self.mtm()).terminate(None);
+        relaunch_app(self.mtm());
     }
 
     fn start(&self, rect: Option<Rect>) {
@@ -2097,13 +2025,28 @@ fn shell_quote(text: &str) -> String {
     text.replace('\'', "'\\''")
 }
 
-fn open_screen_capture_settings() {
-    let url = NSURL::URLWithString(&NSString::from_str(
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-    ));
-    if let Some(url) = Option::<Retained<NSURL>>::from(url) {
-        NSWorkspace::sharedWorkspace().openURL(&url);
+pub(crate) fn relaunch_app(mtm: MainThreadMarker) {
+    log("relaunching");
+    let bundle = NSBundle::mainBundle();
+    let app = bundle.bundlePath().to_string();
+    let exe = bundle.executablePath().map(|p| p.to_string());
+    let command = if app.ends_with(".app") {
+        format!("sleep 1; open -n '{}'", shell_quote(&app))
+    } else if let Some(exe) = exe {
+        format!("sleep 1; '{}' >/dev/null 2>&1 &", shell_quote(&exe))
+    } else {
+        return;
+    };
+    if std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&command)
+        .spawn()
+        .is_err()
+    {
+        log("relaunch: 无法启动重启命令");
+        return;
     }
+    NSApplication::sharedApplication(mtm).terminate(None);
 }
 
 fn window_status(state: &AppState) -> String {

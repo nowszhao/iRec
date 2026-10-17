@@ -20,7 +20,8 @@ Project page: <https://nowszhao.github.io/iRec/>
   mark, then write back over the original PNG.
 - **The clothesline** — results hang under the menu bar: rest the pointer there to drop
   the line, then click, double-click or drag a card wherever you need it.
-- **Quiet by default** — no Dock icon, no window on launch, everything in the status menu.
+- **Quiet by default** — no Dock icon, no window on launch apart from the first-run
+  permission guide, everything else in the status menu.
 - **Never in the shot** — the control window, selection frame and the line use
   `NSWindowSharingType::None`, and the line tucks away while recording.
 - **Configurable hotkeys** — rebind any of the four shortcuts in the hotkey settings.
@@ -29,9 +30,9 @@ Project page: <https://nowszhao.github.io/iRec/>
 
 ## Requirements
 
-macOS 13.0 or later, plus the Screen Recording permission (requested on the first real
-capture — see [Permissions](#permissions)). Building needs a Rust toolchain (edition 2024)
-and the Xcode command line tools.
+macOS 13.0 or later, plus Screen Recording (the first-run permission guide opens the right
+pane — see [Permissions](#permissions)). Building needs a Rust toolchain (edition 2024) and
+the Xcode command line tools.
 
 ## Install
 
@@ -194,17 +195,21 @@ need to be granted again.
 
 ## Permissions
 
-Screen Recording is requested on the first real capture, not at launch. If recording still
-fails:
+On first launch iRec opens a permission guide. macOS does not allow an app to flip its own
+TCC switches, so the guide triggers the system prompts, opens the exact Screen Recording and
+Accessibility panes, and watches both states live. Use **Permission Settings…** in the menu to
+reopen it; once both rows are green, choose **Relaunch iRec**.
+
+If recording still fails, the manual route is:
 
 1. Quit iRec completely.
 2. System Settings → Privacy & Security → Screen Recording: toggle iRec off and on
    (enable every entry if there are several).
 3. Relaunch iRec — macOS applies a grant only to processes started afterwards.
 
-When a start fails, iRec says so and offers **Relaunch iRec** as the first button; the menu
-status line turns into "⚠ Screen Recording permission not in effect — click to relaunch".
-The microphone is granted the same way under Privacy & Security → Microphone.
+When a start fails, iRec opens the same permission guide; the menu status line turns into
+"⚠ Screen Recording permission not in effect — click to relaunch". The microphone is granted
+the same way under Privacy & Security → Microphone.
 
 Scrolling screenshots also need iRec enabled under Privacy & Security → Accessibility so it
 can identify and restore the target page's vertical scroll position.

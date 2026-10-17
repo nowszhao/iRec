@@ -637,8 +637,11 @@ impl Drop for ScrollSession {
 }
 
 fn find_scroll_target(pid: libc::pid_t, point: CGPoint) -> Result<ScrollTarget, String> {
-    let _root = retained_ax(unsafe { AXUIElementCreateApplication(pid) })
-        .ok_or_else(|| "无法读取目标应用的辅助功能信息".to_string())?;
+    let root = retained_ax(unsafe { AXUIElementCreateApplication(pid) });
+    if root.is_none() {
+        log("scroll shot: AX application unavailable; using visual scrolling");
+        return Ok(ScrollTarget::Visual);
+    }
     let mut element_ptr = ptr::null();
     let system = retained_ax(unsafe { AXUIElementCreateSystemWide() })
         .ok_or_else(|| "无法连接 macOS 辅助功能服务".to_string())?;
@@ -651,10 +654,18 @@ fn find_scroll_target(pid: libc::pid_t, point: CGPoint) -> Result<ScrollTarget, 
         )
     };
     if status != 0 {
-        return Err(format!("无法识别选区中的界面元素（辅助功能错误 {status}）"));
+        // WeChat and some custom-drawn apps return kAXErrorNotImplemented
+        // (-25208) for hit testing. Wheel events and frame matching still
+        // work, so do not fail the whole capture.
+        log(&format!(
+            "scroll shot: AX hit test failed ({status}); using visual scrolling"
+        ));
+        return Ok(ScrollTarget::Visual);
     }
-    let mut current =
-        retained_ax(element_ptr).ok_or_else(|| "选区没有对应的辅助功能界面元素".to_string())?;
+    let Some(mut current) = retained_ax(element_ptr) else {
+        log("scroll shot: AX hit test returned no element; using visual scrolling");
+        return Ok(ScrollTarget::Visual);
+    };
     let mut hit_pid = 0;
     let pid_status = unsafe { AXUIElementGetPid(std::ptr::from_ref(&*current), &mut hit_pid) };
     if pid_status != 0 || hit_pid != pid {

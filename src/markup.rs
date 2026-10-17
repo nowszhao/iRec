@@ -13,10 +13,11 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, ClassType, define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezierPath,
-    NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSButton, NSCellImagePosition, NSColor,
-    NSCommandKeyMask, NSEvent, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
-    NSGraphicsContext, NSImage, NSPNGFileType, NSScreen, NSStringDrawing, NSTextField, NSView,
-    NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSBorderType, NSButton, NSCellImagePosition,
+    NSColor, NSCommandKeyMask, NSEvent, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSGraphicsContext, NSImage, NSPNGFileType, NSScreen,
+    NSScrollView, NSScrollerStyle, NSStringDrawing, NSTextField, NSView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{
@@ -251,8 +252,8 @@ define_class!(
         }
 
         #[unsafe(method(drawRect:))]
-        fn draw_rect(&self, _rect: NSRect) {
-            self.paint();
+        fn draw_rect(&self, rect: NSRect) {
+            self.paint(rect);
         }
 
         #[unsafe(method(mouseDown:))]
@@ -490,10 +491,9 @@ impl CanvasView {
         NSPoint::new(r.origin.x + p.0 / u, r.origin.y + p.1 / u)
     }
 
-    fn paint(&self) {
-        let bounds = self.bounds();
+    fn paint(&self, dirty: NSRect) {
         NSColor::colorWithSRGBRed_green_blue_alpha(0.11, 0.11, 0.12, 1.0).setFill();
-        unsafe { NSBezierPath::fillRect(bounds) };
+        unsafe { NSBezierPath::fillRect(dirty) };
         let r = self.image_rect();
         if let Some(image) = self.ivars().image.borrow().as_ref() {
             // 图片底下垫一圈阴影，免得和背景糊在一起。
@@ -1155,16 +1155,20 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
         Some(f) => (f.size.width * 0.82, f.size.height * 0.82 - BAR_H),
         None => (1200.0, 760.0),
     };
-    let scale = (max_w / size.width).min(max_h / size.height).min(1.0);
+    // Long screenshots stay readable: scale by width and scroll vertically
+    // instead of shrinking the whole page into a narrow strip.
+    let scale = (max_w / size.width).min(1.0);
     let canvas_h = (size.height * scale).round();
     let canvas_w = (size.width * scale).round();
+    let view_w = canvas_w.max(560.0);
+    let view_h = canvas_h.min(max_h).max(120.0);
 
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
             NSRect::new(
                 NSPoint::new(0.0, 0.0),
-                NSSize::new(canvas_w, canvas_h + BAR_H),
+                NSSize::new(view_w, view_h + BAR_H),
             ),
             NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
             NSBackingStoreType::Buffered,
@@ -1177,14 +1181,31 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
 
     let canvas = CanvasView::new(mtm);
     canvas.setFrame(NSRect::new(
-        NSPoint::new(0.0, BAR_H),
+        NSPoint::new(0.0, 0.0),
         NSSize::new(canvas_w, canvas_h),
     ));
-    content.addSubview(&canvas);
+    let scroll = NSScrollView::initWithFrame(
+        NSScrollView::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(0.0, BAR_H),
+            NSSize::new(view_w, view_h),
+        ),
+    );
+    scroll.setBorderType(NSBorderType::NoBorder);
+    scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+    scroll.setHasVerticalScroller(true);
+    scroll.setHasHorizontalScroller(false);
+    scroll.setAutohidesScrollers(true);
+    scroll.setDrawsBackground(true);
+    scroll.setBackgroundColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
+        0.11, 0.11, 0.12, 1.0,
+    ));
+    scroll.setDocumentView(Some(&canvas));
+    content.addSubview(&scroll);
 
     let bar = MarkupBar::new(
         mtm,
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(canvas_w, BAR_H)),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(view_w, BAR_H)),
     );
     let tools: [(&str, &str); 4] = [
         ("cursorarrow", "选择 / 移动"),
@@ -1220,23 +1241,25 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
         mtm,
         &undo_icon(),
         "撤销",
-        NSRect::new(NSPoint::new(canvas_w - 210.0, 9.0), NSSize::new(30.0, 28.0)),
+        NSRect::new(NSPoint::new(view_w - 210.0, 9.0), NSSize::new(30.0, 28.0)),
         sel!(undoMark:),
         &canvas,
         0,
     ));
-    bar.addSubview(&text_button(
+    let cancel = text_button(
         mtm,
         "取消",
-        NSRect::new(NSPoint::new(canvas_w - 168.0, 8.0), NSSize::new(72.0, 30.0)),
+        NSRect::new(NSPoint::new(view_w - 168.0, 8.0), NSSize::new(72.0, 30.0)),
         sel!(cancelEdit:),
         &canvas,
         false,
-    ));
+    );
+    cancel.setKeyEquivalent(&NSString::from_str("\u{1b}"));
+    bar.addSubview(&cancel);
     let done = text_button(
         mtm,
         "完成",
-        NSRect::new(NSPoint::new(canvas_w - 88.0, 8.0), NSSize::new(72.0, 30.0)),
+        NSRect::new(NSPoint::new(view_w - 88.0, 8.0), NSSize::new(72.0, 30.0)),
         sel!(doneEdit:),
         &canvas,
         true,
@@ -1263,4 +1286,7 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
     unsafe { app.activateIgnoringOtherApps(true) };
     window.center();
     window.makeKeyAndOrderFront(None);
+    scroll
+        .contentView()
+        .scrollToPoint(NSPoint::new(0.0, (canvas_h - view_h).max(0.0)));
 }

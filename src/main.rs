@@ -113,6 +113,7 @@ define_class!(
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
             hud::close();
+            hotkey::unregister_scroll_cancel();
             scrollpreview::close(self.mtm());
             scrollshot::cancel_and_wait();
             self.stop_sync_if_recording();
@@ -1025,9 +1026,13 @@ impl AppDelegate {
                 let (scale, out_dir) =
                     with_state(|s| (s.settings.scale, s.settings.out_dir.clone()));
                 scrollpreview::show(self.mtm(), rect);
+                if let Err(error) = hotkey::register_scroll_cancel() {
+                    log(&format!("scroll shot: Esc 无法注册：{error}"));
+                }
                 if scrollshot::activate_pid(self.mtm(), target_pid) {
                     scrollshot::start(rect, target_pid, scale, out_dir);
                 } else {
+                    hotkey::unregister_scroll_cancel();
                     scrollpreview::close(self.mtm());
                     with_state(|s| {
                         s.scroll_shot_status = None;
@@ -1054,6 +1059,7 @@ impl AppDelegate {
             }
             Action::ScrollShotFinished(result) => {
                 scrollshot::finish_on_main_thread(self.mtm());
+                hotkey::unregister_scroll_cancel();
                 scrollpreview::close(self.mtm());
                 with_state(|s| s.scroll_shot_status = None);
                 let warning = match &result {

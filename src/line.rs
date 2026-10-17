@@ -29,7 +29,7 @@ use objc2_app_kit::{
     NSView, NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVAssetImageGenerator, AVURLAsset};
-use objc2_core_foundation::CGSize;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
 use objc2_core_graphics::CGImage;
 use objc2_core_media::CMTime;
@@ -688,11 +688,28 @@ impl LineView {
         if !self.ivars().state.borrow().enabled {
             return;
         }
-        let px = CGImage::width(Some(&pending.image)) as f64 / 2.0;
-        let py = CGImage::height(Some(&pending.image)) as f64 / 2.0;
+        let full_w = CGImage::width(Some(&pending.image)) as f64;
+        let full_h = CGImage::height(Some(&pending.image)) as f64;
+        let card_ratio = (CARD_W - 14.0) / PHOTO_MAX_H;
+        let crop_h = (full_w / card_ratio).min(full_h);
+        let cropped = (crop_h + 0.5 < full_h).then(|| {
+            CGImage::with_image_in_rect(
+                Some(&pending.image),
+                CGRect::new(
+                    CGPoint::new(0.0, 0.0),
+                    CGSize::new(full_w, crop_h),
+                ),
+            )
+        });
+        let source: &CGImage = cropped
+            .as_ref()
+            .and_then(|image| image.as_deref())
+            .unwrap_or(&pending.image);
+        let px = full_w / 2.0;
+        let py = crop_h / 2.0;
         let image = NSImage::initWithCGImage_size(
             NSImage::alloc(),
-            &pending.image,
+            source,
             NSSize::new(px.max(1.0), py.max(1.0)),
         );
         let photo = fit(NSSize::new(px.max(1.0), py.max(1.0)));
@@ -1731,6 +1748,25 @@ pub fn hang_image(image: Retained<CGImage>, path: PathBuf, region: Option<Rect>)
 
 #[allow(deprecated)]
 fn first_frame(path: &std::path::Path) -> Result<Retained<CGImage>, String> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "heic" | "tif" | "tiff"
+    ) {
+        let image = NSImage::initWithContentsOfFile(
+            NSImage::alloc(),
+            &NSString::from_str(&path.to_string_lossy()),
+        )
+        .ok_or_else(|| "无法读取图片".to_string())?;
+        return unsafe {
+            image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None)
+        }
+        .ok_or_else(|| "无法生成图片缩略图".to_string());
+    }
     let url =
         NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&path.to_string_lossy()), false);
     let asset = unsafe { AVURLAsset::assetWithURL(&url) };

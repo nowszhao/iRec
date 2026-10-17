@@ -7,20 +7,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use objc2::rc::Retained;
-use objc2::{AnyThread, MainThreadOnly, define_class, msg_send};
+use objc2::runtime::{AnyObject, Sel};
+use objc2::{AnyThread, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSBackingStoreType, NSBezierPath, NSColor, NSFont, NSImage, NSImageScaling, NSImageView,
-    NSScreen, NSTextField, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType,
-    NSWindowStyleMask,
+    NSBackingStoreType, NSBezelStyle, NSBezierPath, NSButton, NSColor, NSFont, NSImage,
+    NSImageScaling, NSImageView, NSPanel, NSScreen, NSTextField, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
 };
 use objc2_core_foundation::CFData;
 use objc2_core_graphics::{
     CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo,
     CGImageByteOrderInfo,
 };
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+};
 
-use crate::state::Rect;
+use crate::state::{Action, Rect, push_action};
 
 const PANEL_W: f64 = 260.0;
 const PANEL_H: f64 = 360.0;
@@ -40,9 +43,10 @@ static VERSION: AtomicU64 = AtomicU64::new(0);
 
 struct Preview {
     border_win: Retained<NSWindow>,
-    panel_win: Retained<NSWindow>,
+    panel_win: Retained<NSPanel>,
     image_view: Retained<NSImageView>,
     count_label: Retained<NSTextField>,
+    _controller: Retained<PreviewController>,
     version: u64,
 }
 
@@ -51,6 +55,34 @@ struct Preview {
 unsafe impl Send for Preview {}
 
 static PREVIEW: Mutex<Option<Preview>> = Mutex::new(None);
+
+define_class!(
+    #[unsafe(super = NSObject)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ()]
+    struct PreviewController;
+
+    unsafe impl NSObjectProtocol for PreviewController {}
+
+    impl PreviewController {
+        #[unsafe(method(previewDone:))]
+        fn done(&self, _sender: &AnyObject) {
+            push_action(Action::FinishScrollShot);
+        }
+
+        #[unsafe(method(previewCancel:))]
+        fn cancel(&self, _sender: &AnyObject) {
+            push_action(Action::CancelScrollShot);
+        }
+    }
+);
+
+impl PreviewController {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 define_class!(
     #[unsafe(super = NSView)]
@@ -184,6 +216,51 @@ fn make_window(
     window
 }
 
+fn make_panel(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSPanel> {
+    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+        NSPanel::alloc(mtm),
+        frame,
+        NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+        NSBackingStoreType::Buffered,
+        false,
+    );
+    unsafe { panel.setReleasedWhenClosed(false) };
+    panel.setFloatingPanel(true);
+    panel.setBecomesKeyOnlyIfNeeded(true);
+    panel.setOpaque(false);
+    panel.setBackgroundColor(Some(&NSColor::clearColor()));
+    panel.setHasShadow(true);
+    panel.setLevel(1001);
+    panel.setHidesOnDeactivate(false);
+    panel.setSharingType(NSWindowSharingType(0));
+    panel.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::Stationary,
+    );
+    panel
+}
+
+fn make_button(
+    mtm: MainThreadMarker,
+    title: &str,
+    frame: NSRect,
+    action: Sel,
+    target: &PreviewController,
+    tint: &NSColor,
+    bordered: bool,
+) -> Retained<NSButton> {
+    let button = NSButton::initWithFrame(NSButton::alloc(mtm), frame);
+    button.setTitle(&NSString::from_str(title));
+    button.setBezelStyle(NSBezelStyle::Push);
+    button.setBordered(bordered);
+    button.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+    button.setContentTintColor(Some(tint));
+    unsafe { button.setAction(Some(action)) };
+    unsafe { button.setTarget(Some(target)) };
+    button
+}
+
 fn make_label(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -251,6 +328,7 @@ fn intersects(a: NSRect, b: NSRect) -> bool {
 pub fn show(mtm: MainThreadMarker, rect: Rect) {
     close(mtm);
     *SHARED.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    let controller = PreviewController::new(mtm);
 
     let border_win = make_window(
         mtm,
@@ -271,7 +349,7 @@ pub fn show(mtm: MainThreadMarker, rect: Rect) {
     }
 
     let frame = panel_frame(mtm, rect);
-    let panel_win = make_window(mtm, frame, 1001, true);
+    let panel_win = make_panel(mtm, frame);
     let panel = PanelView::new(mtm);
     panel.setFrame(NSRect::new(
         NSPoint::new(0.0, 0.0),
@@ -306,8 +384,8 @@ pub fn show(mtm: MainThreadMarker, rect: Rect) {
     let image_view = NSImageView::initWithFrame(
         NSImageView::alloc(mtm),
         NSRect::new(
-            NSPoint::new(14.0, 34.0),
-            NSSize::new(PANEL_W - 28.0, PANEL_H - 76.0),
+            NSPoint::new(14.0, 42.0),
+            NSSize::new(PANEL_W - 28.0, PANEL_H - 80.0),
         ),
     );
     image_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
@@ -324,6 +402,27 @@ pub fn show(mtm: MainThreadMarker, rect: Rect) {
     count_label.setStringValue(&NSString::from_str("等待第一屏…"));
     panel.addSubview(&count_label);
 
+    let cancel = make_button(
+        mtm,
+        "取消",
+        NSRect::new(NSPoint::new(112.0, 8.0), NSSize::new(64.0, 26.0)),
+        sel!(previewCancel:),
+        &controller,
+        &NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.62),
+        false,
+    );
+    panel.addSubview(&cancel);
+    let done = make_button(
+        mtm,
+        "完成",
+        NSRect::new(NSPoint::new(184.0, 8.0), NSSize::new(62.0, 26.0)),
+        sel!(previewDone:),
+        &controller,
+        &NSColor::controlAccentColor(),
+        true,
+    );
+    panel.addSubview(&done);
+
     border_win.orderFrontRegardless();
     panel_win.orderFrontRegardless();
     let mut guard = PREVIEW.lock().unwrap_or_else(|error| error.into_inner());
@@ -332,6 +431,7 @@ pub fn show(mtm: MainThreadMarker, rect: Rect) {
         panel_win,
         image_view,
         count_label,
+        _controller: controller,
         version: 0,
     });
 }

@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use objc2_app_kit::NSEventModifierFlags;
 
-use crate::state::{log, push_action, Action};
+use crate::state::{Action, log, push_action};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -64,6 +64,7 @@ pub const KVK_ESCAPE: u16 = 53;
 
 static HANDLER: Mutex<Option<EventHandlerRef>> = Mutex::new(None);
 static KEYS: Mutex<Vec<EventHotKeyRef>> = Mutex::new(Vec::new());
+static SCROLL_ESC: Mutex<Option<EventHotKeyRef>> = Mutex::new(None);
 
 #[link(name = "Carbon", kind = "framework")]
 unsafe extern "C" {
@@ -193,6 +194,7 @@ pub const SLOT_RECORD_FULL: u32 = 1;
 pub const SLOT_RECORD_REGION: u32 = 2;
 pub const SLOT_SHOT_FULL: u32 = 3;
 pub const SLOT_SHOT_REGION: u32 = 4;
+pub const SLOT_SCROLL_CANCEL: u32 = 5;
 pub const SLOTS: [u32; 4] = [
     SLOT_RECORD_FULL,
     SLOT_RECORD_REGION,
@@ -343,6 +345,49 @@ pub fn unregister_all() {
     }
 }
 
+/// While a scroll capture runs, a bare Esc cancels it even though the target
+/// app owns the keyboard. The hotkey is registered only for that window of
+/// time and removed as soon as the capture ends.
+pub fn register_scroll_cancel() -> Result<(), String> {
+    install_handler()?;
+    let mut guard = SCROLL_ESC.lock().unwrap();
+    if guard.is_some() {
+        return Ok(());
+    }
+    let mut key_ref: *mut c_void = std::ptr::null_mut();
+    let hot_key_id = EventHotKeyID {
+        signature: 0x73637263, // 'scrc'
+        id: SLOT_SCROLL_CANCEL,
+    };
+    let status = unsafe {
+        RegisterEventHotKey(
+            KVK_ESCAPE as u32,
+            0,
+            hot_key_id,
+            GetApplicationEventTarget(),
+            0,
+            &mut key_ref,
+        )
+    };
+    if status != 0 {
+        return Err(format!("RegisterEventHotKey(Esc) failed: {status}"));
+    }
+    *guard = Some(EventHotKeyRef(key_ref));
+    Ok(())
+}
+
+pub fn unregister_scroll_cancel() {
+    let key = SCROLL_ESC
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    if let Some(key) = key {
+        unsafe {
+            UnregisterEventHotKey(key.0);
+        }
+    }
+}
+
 unsafe extern "C" fn hotkey_handler(
     _call_ref: EventHandlerCallRef,
     event: EventRef,
@@ -369,6 +414,7 @@ unsafe extern "C" fn hotkey_handler(
             SLOT_RECORD_REGION => push_action(Action::PickRegion),
             SLOT_SHOT_FULL => push_action(Action::ShotFull),
             SLOT_SHOT_REGION => push_action(Action::PickShot),
+            SLOT_SCROLL_CANCEL => push_action(Action::CancelScrollShot),
             _ => {}
         }
     } else {

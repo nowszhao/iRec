@@ -1050,7 +1050,15 @@ fn find_overlap_in_range(
             second = second.min(average);
         }
     }
-    if best.1 == 0 || best.0 > 32 || best_bad > 0.30 || second <= best.0.saturating_add(1) {
+    // A perfect (or near-perfect) match may have a second candidate one
+    // luminance step away on repetitive pages. Only reject an exact tie in
+    // that case; for noisy frames keep the small tolerance.
+    let ambiguous = if best.0 <= 1 {
+        second <= best.0
+    } else {
+        second <= best.0.saturating_add(1)
+    };
+    if best.1 == 0 || best.0 > 32 || best_bad > 0.30 || ambiguous {
         log(&format!(
             "scroll shot: overlap failed best={} shift={} bad={:.2} second={} cols={} rows={}",
             best.0,

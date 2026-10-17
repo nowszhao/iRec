@@ -17,6 +17,7 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{
     CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGEvent,
     CGEventTapLocation, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo, CGScrollEventUnit,
+    CGWarpMouseCursorPosition,
 };
 use objc2_foundation::{MainThreadMarker, NSError};
 use objc2_screen_capture_kit::{SCContentFilter, SCScreenshotManager, SCStreamConfiguration};
@@ -63,11 +64,6 @@ unsafe extern "C" {
         attribute: *const CFString,
         value: *const CFType,
     ) -> AxError;
-}
-
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGWarpMouseCursorPosition(point: CGPoint) -> i32;
 }
 
 /// Capture the app that was active before the region picker takes focus.
@@ -244,15 +240,13 @@ fn capture(
             initial.height,
             1,
         );
-        // Wheel events are routed by the real pointer location. Keep it on
-        // the selected content for the whole capture, then put it back.
-        let _cursor = CursorGuard::park(center);
         let inner_result = (|| {
             let mut stitched = initial.clone();
             let mut previous = stitched.clone();
             let mut last_value = session.value();
             let mut scrolls = 0;
             let mut screens = 1;
+            let mut user_finished = false;
             let mut last_shift = None;
             let scroll_lines = (rect.h / 200.0).round().clamp(2.0, 4.0) as i32;
             push_action(Action::ScrollShotProgress(
@@ -263,10 +257,18 @@ fn capture(
                 if CONTROL.load(Ordering::Acquire) == CONTROL_CANCEL {
                     return Err("__cancelled__".to_string());
                 }
-                let finish_requested = CONTROL.load(Ordering::Acquire) == CONTROL_FINISH;
+                let mut finish_requested = CONTROL.load(Ordering::Acquire) == CONTROL_FINISH;
                 if !finish_requested {
+                    match wait_for_cursor(rect, display_h) {
+                        PauseResult::Continue => {}
+                        PauseResult::Finish => {
+                            user_finished = true;
+                            break;
+                        }
+                        PauseResult::Cancel => return Err("__cancelled__".to_string()),
+                    }
                     ensure_target_frontmost(target_pid)?;
-                    post_scroll(center, -scroll_lines)?;
+                    post_scroll(-scroll_lines)?;
                     scrolls += 1;
                     thread::sleep(Duration::from_millis(450));
                     if CONTROL.load(Ordering::Acquire) == CONTROL_CANCEL {
@@ -275,6 +277,10 @@ fn capture(
                             session.record(-scroll_lines);
                         }
                         return Err("__cancelled__".to_string());
+                    }
+                    if CONTROL.load(Ordering::Acquire) == CONTROL_FINISH {
+                        finish_requested = true;
+                        user_finished = true;
                     }
                 }
                 ensure_target_frontmost(target_pid)?;
@@ -345,7 +351,7 @@ fn capture(
             if CONTROL.load(Ordering::Acquire) == CONTROL_CANCEL {
                 return Err("__cancelled__".to_string());
             }
-            if stitched.height <= height {
+            if stitched.height <= height && !user_finished {
                 return Err("页面没有可继续滚动的内容".to_string());
             }
 
@@ -376,26 +382,6 @@ fn capture(
     })()
 }
 
-struct CursorGuard {
-    previous: CGPoint,
-}
-
-impl CursorGuard {
-    fn park(point: CGPoint) -> Self {
-        let previous = CGEvent::new(None)
-            .map(|event| CGEvent::location(Some(&event)))
-            .unwrap_or(point);
-        unsafe { CGWarpMouseCursorPosition(point) };
-        Self { previous }
-    }
-}
-
-impl Drop for CursorGuard {
-    fn drop(&mut self) {
-        unsafe { CGWarpMouseCursorPosition(self.previous) };
-    }
-}
-
 fn wait_for_target_frontmost(target_pid: libc::pid_t) -> Result<(), String> {
     for _ in 0..40 {
         if NSRunningApplication::runningApplicationWithProcessIdentifier(target_pid).is_none() {
@@ -410,12 +396,70 @@ fn wait_for_target_frontmost(target_pid: libc::pid_t) -> Result<(), String> {
     Err("无法把目标应用切到前台；请先打开要截取的窗口再重试".to_string())
 }
 
+struct CursorGuard {
+    previous: CGPoint,
+}
+
+impl CursorGuard {
+    fn park(point: CGPoint) -> Self {
+        let previous = cursor_position().unwrap_or(point);
+        CGWarpMouseCursorPosition(point);
+        Self { previous }
+    }
+}
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        CGWarpMouseCursorPosition(self.previous);
+    }
+}
+
 fn ensure_target_frontmost(target_pid: libc::pid_t) -> Result<(), String> {
     let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication();
     if frontmost.is_some_and(|app| app.processIdentifier() == target_pid) {
         Ok(())
     } else {
         Err("目标应用在截屏过程中失去前台，已停止；请重新开始".to_string())
+    }
+}
+
+enum PauseResult {
+    Continue,
+    Finish,
+    Cancel,
+}
+
+fn cursor_in_selection(rect: Rect, display_h: f64) -> bool {
+    let Some(point) = cursor_position() else {
+        return true;
+    };
+    let left = rect.x;
+    let right = rect.x + rect.w;
+    let top = display_h - rect.y - rect.h;
+    let bottom = display_h - rect.y;
+    point.x >= left && point.x <= right && point.y >= top && point.y <= bottom
+}
+
+fn wait_for_cursor(rect: Rect, display_h: f64) -> PauseResult {
+    if cursor_in_selection(rect, display_h) {
+        return PauseResult::Continue;
+    }
+    push_action(Action::ScrollShotProgress(
+        "已暂停：把鼠标移回选区继续，或点预览窗的「完成」「取消」".to_string(),
+    ));
+    loop {
+        match CONTROL.load(Ordering::Acquire) {
+            CONTROL_CANCEL => return PauseResult::Cancel,
+            CONTROL_FINISH => return PauseResult::Finish,
+            _ => {}
+        }
+        if cursor_in_selection(rect, display_h) {
+            push_action(Action::ScrollShotProgress(
+                "继续滚动截屏… 可随时点「完成」或「取消」".to_string(),
+            ));
+            return PauseResult::Continue;
+        }
+        thread::sleep(Duration::from_millis(80));
     }
 }
 
@@ -545,8 +589,9 @@ impl ScrollSession {
         }
         ensure_target_frontmost(self.target_pid)
             .map_err(|_| "目标应用不在前台，未执行滚动位置回放".to_string())?;
+        let _guard = CursorGuard::park(self.center);
         for delta in self.steps.clone().into_iter().rev() {
-            post_scroll(self.center, -delta)?;
+            post_scroll_at(self.center, -delta)?;
             thread::sleep(Duration::from_millis(180));
         }
         thread::sleep(Duration::from_millis(500));
@@ -682,16 +727,23 @@ fn number_value(value: &CFType) -> Option<f64> {
     value.downcast_ref::<CFNumber>()?.as_f64()
 }
 
-fn post_scroll(point: CGPoint, delta: i32) -> Result<(), String> {
-    // Some apps (notably Chrome) ignore wheel events posted to their pid.
-    // A HID event is routed by the actual pointer, so pin it to the selection.
-    unsafe { CGWarpMouseCursorPosition(point) };
-    thread::sleep(Duration::from_millis(20));
+fn cursor_position() -> Option<CGPoint> {
+    CGEvent::new(None).map(|event| CGEvent::location(Some(&event)))
+}
+
+fn post_scroll(delta: i32) -> Result<(), String> {
+    // Wheel events are routed by the actual pointer. Use wherever the user
+    // has the pointer, without moving it. The caller pauses when it leaves
+    // the selection, so the user can click the preview panel or menu.
+    let point = cursor_position().unwrap_or(CGPoint { x: 0.0, y: 0.0 });
+    post_scroll_at(point, delta)
+}
+
+fn post_scroll_at(point: CGPoint, delta: i32) -> Result<(), String> {
     let event = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Line, 1, delta, 0, 0)
         .ok_or_else(|| "无法建立滚动事件".to_string())?;
     CGEvent::set_location(Some(&event), point);
     CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
-    thread::sleep(Duration::from_millis(20));
     Ok(())
 }
 
@@ -1170,4 +1222,5 @@ mod tests {
         let next = sparse_page_frame(width, height, shift);
         assert_eq!(find_overlap(&previous, &next).unwrap(), height - shift);
     }
+
 }

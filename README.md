@@ -131,10 +131,11 @@ briefly brings the target app forward, scrolls and captures until the page ends;
 scrolling screenshot** to stop early or **Cancel scrolling screenshot** to discard it. iRec
 restores the scroll position it found when capture began. This requires both Screen Recording
 and Accessibility access for iRec; grant Accessibility under System Settings → Privacy &
-Security → Accessibility. The pointer parks in the middle of the selection while iRec scrolls
-and returns to where it was afterwards. The selection stays outlined and a live preview panel
-shows the latest screen and the number of stitched screens. Press Esc to cancel, or use the
-Finish / Cancel buttons in the preview panel.
+Security → Accessibility. The pointer stays free while iRec scrolls, so you can use the
+preview panel or the menu at any time. Moving the pointer outside the selection pauses the
+capture; move it back to resume. The selection stays outlined and a live preview panel shows
+the latest screen and the number of stitched screens. Press Esc to cancel, or use the Finish /
+Cancel buttons in the preview panel.
 
 ## Screenshots and annotation
 

@@ -1047,7 +1047,7 @@ impl AppDelegate {
                 scrollshot::request_cancel();
             }
             Action::FinishScrollShot => {
-                with_state(|s| s.scroll_shot_status = Some("正在完成并恢复原位置…".to_string()));
+                with_state(|s| s.scroll_shot_status = Some("正在完成长图…".to_string()));
                 scrollshot::activate_target(self.mtm());
                 scrollshot::request_finish();
             }
@@ -1756,7 +1756,7 @@ impl AppDelegate {
             item.setEnabled(
                 scrolling
                     && !scrollshot::cancel_requested()
-                    && scroll_status.as_deref() != Some("正在完成并恢复原位置…"),
+                    && scroll_status.as_deref() != Some("正在完成长图…"),
             );
         }
         if let Some(item) = self.ivars().cancel_scroll_shot_item.get() {

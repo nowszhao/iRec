@@ -240,6 +240,10 @@ fn capture(
             initial.height,
             1,
         );
+        // Put the pointer into the page once so the first wheel event lands
+        // on the content. After this the pointer is the user's; moving it
+        // outside the selection pauses the capture instead of fighting it.
+        CGWarpMouseCursorPosition(center);
         let inner_result = (|| {
             let mut stitched = initial.clone();
             let mut previous = stitched.clone();
@@ -366,7 +370,14 @@ fn capture(
             Ok((path, bytes))
         })();
 
-        let restore_result = session.restore(|| capture_frame(&filter, &config), &initial);
+        // A finished long shot stays where it ended; only cancel/failure
+        // rolls the page back to the original position.
+        let restore_result = if inner_result.is_ok() {
+            session.skip_restore();
+            Ok(())
+        } else {
+            session.restore(|| capture_frame(&filter, &config), &initial)
+        };
         match (inner_result, restore_result) {
             (Ok((path, bytes)), Ok(())) => Ok((path, bytes, None)),
             (Ok((path, bytes)), Err(error)) => {
@@ -529,6 +540,10 @@ impl ScrollSession {
             return Ok(());
         }
         self.replay_back(capture, initial)
+    }
+
+    fn skip_restore(&mut self) {
+        self.restored = true;
     }
 
     fn restore_scrollbar(

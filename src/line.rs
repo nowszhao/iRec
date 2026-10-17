@@ -984,6 +984,7 @@ impl LineView {
         if let Some(item) = st.items.iter_mut().find(|i| i.path == path) {
             item.image = image;
             item.photo = photo;
+            item.video = !is_image_path(&item.path);
             item.bubble = Some(("已保存".to_string(), Instant::now()));
             nudge(&mut item.swing_v, 3.0);
         }
@@ -1710,6 +1711,7 @@ pub fn init(mtm: MainThreadMarker) {
 
 /// 录完一段：后台取第一帧，主线程把它挂上去。
 pub fn hang_later(path: PathBuf, region: Option<Rect>) {
+    let video = !is_image_path(&path);
     std::thread::spawn(move || match first_frame(&path) {
         Ok(image) => {
             PENDING
@@ -1719,11 +1721,23 @@ pub fn hang_later(path: PathBuf, region: Option<Rect>) {
                     image,
                     path,
                     region,
-                    video: true,
+                    video,
                 });
         }
         Err(err) => crate::state::log(&format!("line: 缩略图生成失败：{err}")),
     });
+}
+
+fn is_image_path(path: &std::path::Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "heic" | "tif" | "tiff" | "gif" | "webp"
+    )
 }
 
 /// 文件被改过之后刷新缩略图（主线程）。
@@ -1748,15 +1762,7 @@ pub fn hang_image(image: Retained<CGImage>, path: PathBuf, region: Option<Rect>)
 
 #[allow(deprecated)]
 fn first_frame(path: &std::path::Path) -> Result<Retained<CGImage>, String> {
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if matches!(
-        extension.as_str(),
-        "png" | "jpg" | "jpeg" | "heic" | "tif" | "tiff"
-    ) {
+    if is_image_path(path) {
         let image = NSImage::initWithContentsOfFile(
             NSImage::alloc(),
             &NSString::from_str(&path.to_string_lossy()),

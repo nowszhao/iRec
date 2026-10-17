@@ -14,6 +14,8 @@ Project page: <https://nowszhao.github.io/iRec/>
   (HEVC + AAC). Quality, frame rate (30 / 60) and resolution (1x / 2x) are adjustable.
 - **Audio** — off / system audio / microphone / system + microphone, each on its own track.
 - **Screenshots** — full screen or the selected region, saved as PNG.
+- **Scrolling screenshots** — select a browser page or another accessible scroll area, then
+  let iRec scroll and stitch it into one PNG; the original scroll position is restored.
 - **Annotation** — arrows, boxes and text drawn in iRec; move, resize and recolour any
   mark, then write back over the original PNG.
 - **The clothesline** — results hang under the menu bar: rest the pointer there to drop
@@ -123,6 +125,15 @@ move it, drag the grip to resize it, and use **Screenshot** or **Start recording
 Changing the region during a recording applies to the next one, so the current video never
 jumps.
 
+For a scrolling screenshot, first bring the target app forward and choose **Scrolling
+screenshot…** from the menu-bar menu. Select the page content, not the browser toolbar. iRec
+briefly brings the target app forward, scrolls and captures until the page ends; use **Finish
+scrolling screenshot** to stop early or **Cancel scrolling screenshot** to discard it. iRec
+restores the scroll position it found when capture began. This requires both Screen Recording
+and Accessibility access for iRec; grant Accessibility under System Settings → Privacy &
+Security → Accessibility. The pointer parks in the middle of the selection while iRec scrolls
+and returns to where it was afterwards.
+
 ## Screenshots and annotation
 
 Screenshots are saved as `iRec-shot-YYYYMMDD-HHMMSS.png` and hung on the line. Annotate
@@ -190,6 +201,9 @@ fails:
 When a start fails, iRec says so and offers **Relaunch iRec** as the first button; the menu
 status line turns into "⚠ Screen Recording permission not in effect — click to relaunch".
 The microphone is granted the same way under Privacy & Security → Microphone.
+
+Scrolling screenshots also need iRec enabled under Privacy & Security → Accessibility so it
+can identify and restore the target page's vertical scroll position.
 
 Two things make a grant look revoked: rebuilding (ad-hoc signing creates a new code
 identity each time) and changing the signature or the bundle id `com.nows.irec`.

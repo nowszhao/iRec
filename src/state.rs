@@ -22,8 +22,22 @@ pub enum Action {
     ShotFull,
     /// Open the region picker to screenshot the selection.
     PickShot,
+    /// Open the region picker for a scroll capture.
+    PickScrollShot,
     /// Screenshot the selected rectangle (Cocoa screen coordinates).
     ShotRegion(Rect),
+    /// Start scroll capture on the selected screen region.
+    ScrollShotRegion(Rect, libc::pid_t),
+    /// Cancel an active scroll capture and restore its original scroll position.
+    CancelScrollShot,
+    /// Finish an active scroll capture at the current position.
+    FinishScrollShot,
+    /// Scroll capture progress or completion notification.
+    ScrollShotProgress(String),
+    /// Notify the main thread that scroll capture has finished or failed.
+    ScrollShotFinished(ScrollShotResult),
+    /// Region selection was dismissed without starting capture.
+    ScrollShotSelectionCancelled,
     /// Open a saved image in the system Markup editor.
     Markup(PathBuf),
     /// 把某个动作的快捷键改成 key（slot 见 `hotkey::SLOTS`）。
@@ -36,6 +50,15 @@ pub enum Action {
     UpdateAlert(String),
     /// 新版本已下载解压好，参数是暂存的 iRec.app 路径。
     UpdateReady(PathBuf),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScrollShotResult {
+    Finished(PathBuf, u64),
+    /// Image saved, but the original scroll position could not be restored.
+    FinishedWithWarning(PathBuf, u64, String),
+    Cancelled,
+    Failed(String),
 }
 
 /// 自动更新的进展。
@@ -292,6 +315,8 @@ pub struct AppState {
     /// When the last recording finished (used for the transient status title).
     pub saved_at: Option<Instant>,
     pub last_error: Option<String>,
+    /// Status text while a scroll screenshot is running.
+    pub scroll_shot_status: Option<String>,
     /// 上一次开始录制被 macOS 的权限挡住了：提示和状态行都按这个走。
     pub permission_blocked: bool,
     /// 自动更新的进展（有新版本 / 正在下载 / 失败原因）。
@@ -314,6 +339,7 @@ impl Default for AppState {
             region: None,
             saved_at: None,
             last_error: None,
+            scroll_shot_status: None,
             permission_blocked: false,
             update: None,
             update_checked_at: None,

@@ -7,6 +7,7 @@ mod markup;
 mod mic;
 mod overlay;
 mod recorder;
+mod scrollshot;
 mod shot;
 mod state;
 mod update;
@@ -39,7 +40,7 @@ use crate::overlay::pick_region;
 use crate::recorder::Recorder;
 use crate::state::{
     dirs_desktop, init_state, load_persisted, log, persist, push_action, with_state, Action,
-    AppState, AudioSource, Quality, Rect, Settings, Update, STATE,
+    AppState, AudioSource, Quality, Rect, ScrollShotResult, Settings, Update, STATE,
 };
 
 #[derive(Default)]
@@ -71,6 +72,9 @@ struct AppIvars {
     region_menu_item: OnceCell<Retained<NSMenuItem>>,
     shot_full_item: OnceCell<Retained<NSMenuItem>>,
     shot_region_item: OnceCell<Retained<NSMenuItem>>,
+    scroll_shot_item: OnceCell<Retained<NSMenuItem>>,
+    finish_scroll_shot_item: OnceCell<Retained<NSMenuItem>>,
+    cancel_scroll_shot_item: OnceCell<Retained<NSMenuItem>>,
     hotkey_window: OnceCell<Retained<NSWindow>>,
     hotkey_fields: RefCell<Vec<Retained<NSTextField>>>,
     capture_panel: OnceCell<Retained<NSWindow>>,
@@ -108,6 +112,7 @@ define_class!(
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
             hud::close();
+            scrollshot::cancel_and_wait();
             self.stop_sync_if_recording();
         }
     }
@@ -183,6 +188,21 @@ define_class!(
         #[unsafe(method(shotRegion:))]
         fn shot_region(&self, _sender: &AnyObject) {
             push_action(Action::PickShot);
+        }
+
+        #[unsafe(method(scrollShot:))]
+        fn scroll_shot(&self, _sender: &AnyObject) {
+            push_action(Action::PickScrollShot);
+        }
+
+        #[unsafe(method(finishScrollShot:))]
+        fn finish_scroll_shot(&self, _sender: &AnyObject) {
+            push_action(Action::FinishScrollShot);
+        }
+
+        #[unsafe(method(cancelScrollShot:))]
+        fn cancel_scroll_shot(&self, _sender: &AnyObject) {
+            push_action(Action::CancelScrollShot);
         }
 
         #[unsafe(method(annotateLast:))]
@@ -744,6 +764,20 @@ impl AppDelegate {
         menu.addItem(&shot_region);
         self.ivars().shot_region_item.set(shot_region).ok();
 
+        let scroll_shot = menu_item(mtm, "滚动截屏…", Some(sel!(scrollShot:)), self, 0);
+        menu.addItem(&scroll_shot);
+        self.ivars().scroll_shot_item.set(scroll_shot).ok();
+
+        let finish_scroll_shot = menu_item(mtm, "完成滚动截屏", Some(sel!(finishScrollShot:)), self, 0);
+        finish_scroll_shot.setHidden(true);
+        menu.addItem(&finish_scroll_shot);
+        self.ivars().finish_scroll_shot_item.set(finish_scroll_shot).ok();
+
+        let cancel_scroll_shot = menu_item(mtm, "取消滚动截屏", Some(sel!(cancelScrollShot:)), self, 0);
+        cancel_scroll_shot.setHidden(true);
+        menu.addItem(&cancel_scroll_shot);
+        self.ivars().cancel_scroll_shot_item.set(cancel_scroll_shot).ok();
+
         let annotate = menu_item(mtm, "标注最新截图…", Some(sel!(annotateLast:)), self, 0);
         menu.addItem(&annotate);
         self.ivars().annotate_item.set(annotate).ok();
@@ -972,6 +1006,76 @@ impl AppDelegate {
             },
             Action::ShotRegion(rect) => {
                 self.screenshot(Some(rect));
+            }
+            Action::PickScrollShot => match scrollshot::frontmost_target_pid() {
+                Ok(target_pid) => {
+                    with_state(|s| {
+                        s.last_error = None;
+                        s.scroll_shot_status = Some("请框选页面内容；开始后 iRec 会临时切换到目标应用".to_string());
+                    });
+                    overlay::pick_scroll_region(self.mtm(), target_pid);
+                }
+                Err(err) => with_state(|s| s.last_error = Some(err)),
+            },
+            Action::ScrollShotRegion(rect, target_pid) => {
+                with_state(|s| s.scroll_shot_status = Some("正在切换到目标应用…".to_string()));
+                let (scale, out_dir) =
+                    with_state(|s| (s.settings.scale, s.settings.out_dir.clone()));
+                if scrollshot::activate_pid(self.mtm(), target_pid) {
+                    scrollshot::start(rect, target_pid, scale, out_dir);
+                } else {
+                    with_state(|s| {
+                        s.scroll_shot_status = None;
+                        s.last_error =
+                            Some("目标应用已退出，请重新开始滚动截屏".to_string());
+                    });
+                }
+            }
+            Action::CancelScrollShot => {
+                with_state(|s| s.scroll_shot_status = Some("正在取消并恢复原位置…".to_string()));
+                scrollshot::activate_target(self.mtm());
+                scrollshot::request_cancel();
+            }
+            Action::FinishScrollShot => {
+                with_state(|s| s.scroll_shot_status = Some("正在完成并恢复原位置…".to_string()));
+                scrollshot::activate_target(self.mtm());
+                scrollshot::request_finish();
+            }
+            Action::ScrollShotProgress(message) => {
+                with_state(|s| s.scroll_shot_status = Some(message));
+            }
+            Action::ScrollShotSelectionCancelled => {
+                with_state(|s| s.scroll_shot_status = None);
+            }
+            Action::ScrollShotFinished(result) => {
+                scrollshot::finish_on_main_thread(self.mtm());
+                with_state(|s| s.scroll_shot_status = None);
+                let warning = match &result {
+                    ScrollShotResult::FinishedWithWarning(_, _, warning) => {
+                        Some(warning.clone())
+                    }
+                    _ => None,
+                };
+                match result {
+                    ScrollShotResult::Finished(path, bytes)
+                    | ScrollShotResult::FinishedWithWarning(path, bytes, _) => {
+                        line::hang_later(path.clone(), None);
+                        with_state(|s| {
+                            s.last_saved = Some((path.clone(), bytes));
+                            s.saved_at = Some(Instant::now());
+                            s.last_error = warning.clone();
+                        });
+                        if with_state(|s| s.settings.markup) {
+                            push_action(Action::Markup(path));
+                        }
+                    }
+                    ScrollShotResult::Cancelled => {
+                        log("scroll shot cancelled; original position restored");
+                    }
+                    ScrollShotResult::Failed(err) => {
+                        with_state(|s| s.last_error = Some(err));
+                    }
+                }
             }
             Action::Markup(path) => {
                 crate::markup::edit(path, |path| {
@@ -1626,8 +1730,26 @@ impl AppDelegate {
     fn refresh_menu(&self) {
         let settings = with_state(|s| s.settings.clone());
         let (recording, stopping) = with_state(|s| (s.recorder.is_some(), s.stopping));
+        let scroll_status = with_state(|s| s.scroll_shot_status.clone());
+        let scrolling = scrollshot::is_active();
         if let Some(item) = self.ivars().stop_menu_item.get() {
             item.setEnabled(recording && !stopping);
+        }
+        if let Some(item) = self.ivars().scroll_shot_item.get() {
+            item.setHidden(scrolling);
+            item.setEnabled(!recording && !stopping && !scrolling && scroll_status.is_none());
+        }
+        if let Some(item) = self.ivars().finish_scroll_shot_item.get() {
+            item.setHidden(!scrolling);
+            item.setEnabled(
+                scrolling
+                    && !scrollshot::cancel_requested()
+                    && scroll_status.as_deref() != Some("正在完成并恢复原位置…"),
+            );
+        }
+        if let Some(item) = self.ivars().cancel_scroll_shot_item.get() {
+            item.setHidden(!scrolling);
+            item.setEnabled(scrolling);
         }
         for (index, item) in self.ivars().audio_items.borrow().iter() {
             let matches = AudioSource::all()[*index] == settings.audio;
@@ -1729,6 +1851,8 @@ impl AppDelegate {
             let text = with_state(|s| {
                 if s.permission_blocked {
                     None
+                } else if let Some(status) = &s.scroll_shot_status {
+                    Some(status.clone())
                 } else if let Some(err) = &s.last_error {
                     Some(format!("⚠ {err}"))
                 } else if let Some((path, bytes)) = &s.last_saved {
@@ -2014,6 +2138,15 @@ fn status_title(state: &AppState) -> String {
                 return format!("✓ {:.1} MB", *bytes as f64 / 1_048_576.0);
             }
         }
+    }
+    if let Some(status) = &state.scroll_shot_status {
+        if status.contains("取消") {
+            return "⇅ 取消中".to_string();
+        }
+        if status.contains("完成") {
+            return "⇅ 完成中".to_string();
+        }
+        return "⇅ 滚动截屏".to_string();
     }
     if let Some(err) = &state.last_error {
         if err.len() > 12 {

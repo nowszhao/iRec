@@ -16,12 +16,15 @@ use objc2_foundation::{
 };
 
 use crate::hud;
+use crate::scrollshot;
 use crate::state::{Action, Rect, push_action};
 
 #[derive(Default)]
 struct RegionIvars {
     /// 选完直接截图，而不是留下选区框等着录。
     shot: Cell<bool>,
+    scroll_shot: Cell<bool>,
+    scroll_target_pid: Cell<libc::pid_t>,
     start: Cell<Option<NSPoint>>,
     current: Cell<Option<NSPoint>>,
 }
@@ -65,30 +68,52 @@ define_class!(
                 });
             self.ivars().start.set(None);
             self.ivars().current.set(None);
+            let valid = picked.filter(|rect| rect.w >= 16.0 && rect.h >= 16.0);
+            if self.ivars().scroll_shot.get() && valid.is_some() {
+                // Hand focus back while iRec is still the active app; the
+                // system can refuse the handoff after the overlay closes.
+                scrollshot::activate_pid(self.mtm(), self.ivars().scroll_target_pid.get());
+            }
             if let Some(window) = self.window() {
                 window.close();
             }
             NSApplication::sharedApplication(self.mtm())
                 .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-            if let Some(rect) = picked {
-                if rect.w >= 16.0 && rect.h >= 16.0 {
-                    if self.ivars().shot.get() {
+            match valid {
+                Some(rect) => {
+                    if self.ivars().scroll_shot.get() {
+                        push_action(Action::ScrollShotRegion(rect, self.ivars().scroll_target_pid.get()));
+                    } else if self.ivars().shot.get() {
                         push_action(Action::ShotRegion(rect));
                     } else {
                         // The frame stays on screen; recording starts from its bar.
                         hud::show(rect);
                     }
                 }
+                None if self.ivars().scroll_shot.get() => {
+                    scrollshot::activate_pid(
+                        self.mtm(),
+                        self.ivars().scroll_target_pid.get(),
+                    );
+                    push_action(Action::ScrollShotSelectionCancelled);
+                }
+                None => {}
             }
         }
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, _event: &NSEvent) {
+            if self.ivars().scroll_shot.get() {
+                push_action(Action::ScrollShotSelectionCancelled);
+            }
             if let Some(window) = self.window() {
                 window.close();
             }
             NSApplication::sharedApplication(self.mtm())
                 .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            if self.ivars().scroll_shot.get() {
+                scrollshot::activate_pid(self.mtm(), self.ivars().scroll_target_pid.get());
+            }
         }
 
         #[unsafe(method(acceptsFirstResponder))]
@@ -164,7 +189,11 @@ impl RegionView {
                 }
             }
             None => {
-                let hint = NSString::from_str("拖动选择录制区域 · 按任意键取消");
+                let hint = NSString::from_str(if self.ivars().scroll_shot.get() {
+                    "拖动选择滚动截屏区域 · 按任意键取消"
+                } else {
+                    "拖动选择录制区域 · 按任意键取消"
+                });
                 let size = unsafe { hint.sizeWithAttributes(Some(&attrs)) };
                 unsafe {
                     hint.drawAtPoint_withAttributes(
@@ -204,6 +233,19 @@ fn rect_from_points(a: NSPoint, b: NSPoint) -> NSRect {
 /// 选完如果是截图模式就 push `Action::ShotRegion`，录制模式则留下选区框；取消什么都不做。
 /// `shot = true` 时选完直接截图，否则留下选区框等着录。
 pub fn pick_region(mtm: MainThreadMarker, shot: bool) {
+    pick_region_mode(mtm, shot, false, 0);
+}
+
+pub fn pick_scroll_region(mtm: MainThreadMarker, target_pid: libc::pid_t) {
+    pick_region_mode(mtm, true, true, target_pid);
+}
+
+fn pick_region_mode(
+    mtm: MainThreadMarker,
+    shot: bool,
+    scroll_shot: bool,
+    target_pid: libc::pid_t,
+) {
     let app = NSApplication::sharedApplication(mtm);
     // Become a regular app briefly so the overlay can become key and take
     // keyboard events (Escape / any key cancels).
@@ -233,6 +275,8 @@ pub fn pick_region(mtm: MainThreadMarker, shot: bool) {
 
     let view = RegionView::new(mtm);
     view.ivars().shot.set(shot);
+    view.ivars().scroll_shot.set(scroll_shot);
+    view.ivars().scroll_target_pid.set(target_pid);
     view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
     view.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,

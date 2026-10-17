@@ -151,7 +151,7 @@ fn message_of(error: *mut NSError) -> String {
 }
 
 /// CGImage → PNG 文件。
-fn save_png(image: &CGImage, dir: &Path) -> Result<(PathBuf, u64), String> {
+pub(crate) fn save_png(image: &CGImage, dir: &Path) -> Result<(PathBuf, u64), String> {
     let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), image);
     let props = NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
     let data = unsafe { rep.representationUsingType_properties(NSPNGFileType, &props) }

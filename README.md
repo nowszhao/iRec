@@ -132,7 +132,8 @@ scrolling screenshot** to stop early or **Cancel scrolling screenshot** to disca
 restores the scroll position it found when capture began. This requires both Screen Recording
 and Accessibility access for iRec; grant Accessibility under System Settings → Privacy &
 Security → Accessibility. The pointer parks in the middle of the selection while iRec scrolls
-and returns to where it was afterwards.
+and returns to where it was afterwards. The selection stays outlined and a live preview panel
+shows the latest screen and the number of stitched screens.
 
 ## Screenshots and annotation
 

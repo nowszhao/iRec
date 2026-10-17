@@ -7,6 +7,7 @@ mod markup;
 mod mic;
 mod overlay;
 mod recorder;
+mod scrollpreview;
 mod scrollshot;
 mod shot;
 mod state;
@@ -112,6 +113,7 @@ define_class!(
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
             hud::close();
+            scrollpreview::close(self.mtm());
             scrollshot::cancel_and_wait();
             self.stop_sync_if_recording();
         }
@@ -152,6 +154,7 @@ define_class!(
                 }
             }
             self.maybe_auto_check_update();
+            scrollpreview::sync(self.mtm());
             self.refresh_status();
             self.refresh_menu();
             self.update_window();
@@ -1021,9 +1024,11 @@ impl AppDelegate {
                 with_state(|s| s.scroll_shot_status = Some("正在切换到目标应用…".to_string()));
                 let (scale, out_dir) =
                     with_state(|s| (s.settings.scale, s.settings.out_dir.clone()));
+                scrollpreview::show(self.mtm(), rect);
                 if scrollshot::activate_pid(self.mtm(), target_pid) {
                     scrollshot::start(rect, target_pid, scale, out_dir);
                 } else {
+                    scrollpreview::close(self.mtm());
                     with_state(|s| {
                         s.scroll_shot_status = None;
                         s.last_error =
@@ -1049,6 +1054,7 @@ impl AppDelegate {
             }
             Action::ScrollShotFinished(result) => {
                 scrollshot::finish_on_main_thread(self.mtm());
+                scrollpreview::close(self.mtm());
                 with_state(|s| s.scroll_shot_status = None);
                 let warning = match &result {
                     ScrollShotResult::FinishedWithWarning(_, _, warning) => {

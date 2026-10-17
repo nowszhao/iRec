@@ -22,13 +22,14 @@ use objc2_foundation::{MainThreadMarker, NSError};
 use objc2_screen_capture_kit::{SCContentFilter, SCScreenshotManager, SCStreamConfiguration};
 
 use crate::recorder::{fetch_shareable_content, main_display, own_windows};
+use crate::scrollpreview;
 use crate::shot;
 use crate::state::{Action, Rect, ScrollShotResult, log, push_action};
 
 const CONTROL_CONTINUE: u8 = 0;
 const CONTROL_FINISH: u8 = 1;
 const CONTROL_CANCEL: u8 = 2;
-const MAX_SCROLLS: usize = 60;
+const MAX_SCROLLS: usize = 90;
 const MAX_IMAGE_HEIGHT: usize = 50_000;
 const MAX_IMAGE_PIXELS: usize = 60_000_000;
 const MAX_CAPTURE_PIXELS: usize = 20_000_000;
@@ -176,6 +177,13 @@ fn capture(
                 .to_string(),
         );
     }
+    if rect.w < 80.0 || rect.h < 80.0 {
+        return Err("滚动截屏选区太小，请至少框选 80 × 80 的页面区域".to_string());
+    }
+    log(&format!(
+        "scroll shot: start pid {target_pid} rect {:.0},{:.0} {:.0}x{:.0}",
+        rect.x, rect.y, rect.w, rect.h
+    ));
 
     wait_for_target_frontmost(target_pid)?;
     (|| {
@@ -229,6 +237,13 @@ fn capture(
         }
 
         let initial = capture_frame(&filter, &config)?;
+        scrollpreview::publish(
+            initial.width,
+            initial.height,
+            &initial.rgba,
+            initial.height,
+            1,
+        );
         // Wheel events are routed by the real pointer location. Keep it on
         // the selected content for the whole capture, then put it back.
         let _cursor = CursorGuard::park(center);
@@ -237,8 +252,9 @@ fn capture(
             let mut previous = stitched.clone();
             let mut last_value = session.value();
             let mut scrolls = 0;
+            let mut screens = 1;
             let mut last_shift = None;
-            let scroll_lines = (rect.h / 120.0).round().clamp(2.0, 6.0) as i32;
+            let scroll_lines = (rect.h / 200.0).round().clamp(2.0, 4.0) as i32;
             push_action(Action::ScrollShotProgress(
                 "正在滚动截屏… 可随时完成或取消".to_string(),
             ));
@@ -289,15 +305,37 @@ fn capture(
                 if !finish_requested {
                     session.record(-scroll_lines);
                 }
+                let overlap = match find_overlap_with_hint(&previous, &frame, last_shift) {
+                    Ok(overlap) => overlap,
+                    Err(first_error) => {
+                        // Smooth scrolling or a lazy-loading page can still be
+                        // moving when the frame arrives. Give it one more beat.
+                        thread::sleep(Duration::from_millis(550));
+                        frame = capture_frame(&filter, &config)?;
+                        find_overlap_with_hint(&previous, &frame, last_shift).map_err(|_| {
+                            format!(
+                                "{first_error}（已重试一次；请重新框选更大的页面区域，避开固定工具栏和动画内容）"
+                            )
+                        })?
+                    }
+                };
                 let before = stitched.height;
-                if !stitched.append_next(&previous, &frame, last_shift)? {
+                if !stitched.append_with_overlap(&frame, overlap)? {
                     break;
                 }
+                screens += 1;
+                scrollpreview::publish(
+                    stitched.width,
+                    stitched.height,
+                    &stitched.rgba,
+                    frame.height,
+                    screens,
+                );
                 last_shift = Some(stitched.height - before);
                 previous = frame;
                 push_action(Action::ScrollShotProgress(format!(
                     "滚动截屏中：已拼接 {} 屏，可随时完成或取消",
-                    scrolls + 1
+                    screens
                 )));
                 if finish_requested || value.is_some_and(|value| value >= 0.999_99) {
                     break;
@@ -787,6 +825,7 @@ impl PixelFrame {
 
     /// Stitch `next` below the current image. Returns `false` when the
     /// configured size limits would be exceeded.
+    #[cfg(test)]
     fn append_next(
         &mut self,
         previous: &Self,
@@ -794,6 +833,10 @@ impl PixelFrame {
         hint: Option<usize>,
     ) -> Result<bool, String> {
         let overlap = find_overlap_with_hint(previous, next, hint)?;
+        self.append_with_overlap(next, overlap)
+    }
+
+    fn append_with_overlap(&mut self, next: &Self, overlap: usize) -> Result<bool, String> {
         let added = next.height.saturating_sub(overlap);
         if added == 0 {
             return Err("页面没有继续向下滚动，请检查选区或滚动区域".to_string());
@@ -887,20 +930,29 @@ fn find_overlap_in_range(
         ),
         None => (min_shift, max_shift),
     };
-    let step_y = (height / 140).max(1);
     let step_x = (previous.width / 160).max(1);
+    let (active_columns, active_rows) = motion_mask(previous, next);
+    let sample_columns: Vec<usize> = active_columns.iter().copied().step_by(step_x).collect();
+    if sample_columns.is_empty() || active_rows.is_empty() {
+        return Err("画面没有可用的滚动内容，无法拼接".to_string());
+    }
     let mut best = (usize::MAX, 0usize);
+    let mut best_bad = 1.0f64;
     let mut second = usize::MAX;
     // A two-pixel stride can miss the true offset by one pixel and make two
     // neighboring shifts look equally plausible. Check every row offset.
     for shift in min_shift..=max_shift {
         let overlap = height - shift;
         let mut score = 0u64;
+        let mut bad = 0u64;
         let mut samples = 0u64;
-        for y in (0..overlap).step_by(step_y) {
+        for &y in &active_rows {
+            if y >= overlap {
+                break;
+            }
             let prev_row = (y + shift) * previous.width * 4;
             let next_row = y * next.width * 4;
-            for x in (0..previous.width).step_by(step_x) {
+            for &x in &sample_columns {
                 let a = prev_row + x * 4;
                 let b = next_row + x * 4;
                 let lum_a = (previous.rgba[a] as u32 * 3
@@ -911,7 +963,11 @@ fn find_overlap_in_range(
                     + next.rgba[b + 1] as u32 * 6
                     + next.rgba[b + 2] as u32)
                     / 10;
-                score += lum_a.abs_diff(lum_b) as u64;
+                let difference = lum_a.abs_diff(lum_b);
+                score += difference as u64;
+                if difference > 14 {
+                    bad += 1;
+                }
                 samples += 1;
             }
         }
@@ -921,17 +977,74 @@ fn find_overlap_in_range(
         let average = (score / samples) as usize;
         if average < best.0 {
             second = best.0;
+            best_bad = bad as f64 / samples as f64;
             best = (average, shift);
         } else if shift.abs_diff(best.1) > height / 40 {
             second = second.min(average);
         }
     }
-    if best.1 == 0 || best.0 > 26 || second <= best.0.saturating_add(1) {
+    if best.1 == 0 || best.0 > 32 || best_bad > 0.30 || second <= best.0.saturating_add(1) {
+        log(&format!(
+            "scroll shot: overlap failed best={} shift={} bad={:.2} second={} cols={} rows={}",
+            best.0,
+            best.1,
+            best_bad,
+            second,
+            sample_columns.len(),
+            active_rows.len()
+        ));
         return Err("画面重叠无法可靠识别，已停止拼接；请框选稳定的页面内容后重试".to_string());
     }
     // `shift` is the scroll distance; the number of rows shared by both
     // frames is the viewport height minus that distance.
     Ok(height - best.1)
+}
+
+/// Columns and rows that actually change between the two frames. Fixed
+/// toolbars, sidebars and blank margins are excluded so they cannot bias the
+/// match toward a zero offset or create a false tie.
+fn motion_mask(previous: &PixelFrame, next: &PixelFrame) -> (Vec<usize>, Vec<usize>) {
+    let width = previous.width;
+    let height = previous.height;
+    let step_x = (width / 300).max(1);
+    let mut columns = vec![0u64; width];
+    let mut rows = vec![0u64; height];
+    for (y, row) in rows.iter_mut().enumerate() {
+        for x in (0..width).step_by(step_x) {
+            let offset = (y * width + x) * 4;
+            let lum_a = (previous.rgba[offset] as u32 * 3
+                + previous.rgba[offset + 1] as u32 * 6
+                + previous.rgba[offset + 2] as u32)
+                / 10;
+            let lum_b = (next.rgba[offset] as u32 * 3
+                + next.rgba[offset + 1] as u32 * 6
+                + next.rgba[offset + 2] as u32)
+                / 10;
+            let difference = lum_a.abs_diff(lum_b) as u64;
+            columns[x] += difference;
+            *row += difference;
+        }
+    }
+
+    fn select(activity: &[u64], total: usize) -> Vec<usize> {
+        let max = activity.iter().copied().max().unwrap_or(0);
+        if max < 8 {
+            return (0..total).collect();
+        }
+        let threshold = (max / 12).max(2);
+        let active: Vec<usize> = activity
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| (*value >= threshold).then_some(index))
+            .collect();
+        if active.len() < total / 8 {
+            (0..total).collect()
+        } else {
+            active
+        }
+    }
+
+    (select(&columns, width), select(&rows, height))
 }
 
 #[cfg(test)]
@@ -1025,6 +1138,20 @@ mod tests {
                     248
                 };
                 rgba[offset..offset + 4].copy_from_slice(&[tint, tint, tint, 255]);
+            }
+        }
+        // Fixed toolbar at the top of the viewport.
+        for y in 0..40 {
+            for x in 0..width {
+                let offset = (y * width + x) * 4;
+                rgba[offset..offset + 4].copy_from_slice(&[228, 228, 228, 255]);
+            }
+        }
+        for i in 0..14 {
+            let x = 16 + i * 32;
+            for y in 12..24 {
+                let offset = (y * width + x) * 4;
+                rgba[offset..offset + 4].copy_from_slice(&[60, 60, 60, 255]);
             }
         }
         PixelFrame {

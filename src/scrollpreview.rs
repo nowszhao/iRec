@@ -154,10 +154,10 @@ define_class!(
                 8.0,
                 8.0,
             );
-            NSColor::colorWithSRGBRed_green_blue_alpha(0.055, 0.075, 0.10, 0.95).setFill();
+            NSColor::windowBackgroundColor().setFill();
             panel.fill();
             panel.setLineWidth(1.0);
-            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.16).setStroke();
+            NSColor::separatorColor().setStroke();
             panel.stroke();
         }
     }
@@ -179,7 +179,7 @@ define_class!(
     impl RuleView {
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _rect: NSRect) {
-            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.12).setFill();
+            NSColor::separatorColor().setFill();
             NSBezierPath::fillRect(self.bounds());
         }
     }
@@ -367,7 +367,7 @@ pub fn show(mtm: MainThreadMarker, rect: Rect) {
         ),
         12.0,
         true,
-        &NSColor::whiteColor(),
+        &NSColor::labelColor(),
     );
     title.setStringValue(&NSString::from_str("长图预览"));
     panel.addSubview(&title);
@@ -397,7 +397,7 @@ pub fn show(mtm: MainThreadMarker, rect: Rect) {
         NSRect::new(NSPoint::new(14.0, 10.0), NSSize::new(PANEL_W - 28.0, 18.0)),
         11.0,
         false,
-        &NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.62),
+        &NSColor::secondaryLabelColor(),
     );
     count_label.setStringValue(&NSString::from_str("等待第一屏…"));
     panel.addSubview(&count_label);
@@ -408,7 +408,7 @@ pub fn show(mtm: MainThreadMarker, rect: Rect) {
         NSRect::new(NSPoint::new(112.0, 8.0), NSSize::new(64.0, 26.0)),
         sel!(previewCancel:),
         &controller,
-        &NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.62),
+        &NSColor::secondaryLabelColor(),
         false,
     );
     panel.addSubview(&cancel);

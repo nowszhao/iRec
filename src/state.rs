@@ -26,6 +26,8 @@ pub enum Action {
     PickScrollShot,
     /// Screenshot the selected rectangle (Cocoa screen coordinates).
     ShotRegion(Rect),
+    /// Capture once and open the annotation editor without changing preferences.
+    ShotRegionAnnotated(Rect),
     /// Start scroll capture on the selected screen region.
     ScrollShotRegion(Rect, libc::pid_t),
     /// Cancel an active scroll capture and restore its original scroll position.
@@ -153,7 +155,12 @@ impl Quality {
     }
 
     pub fn all() -> [Quality; 4] {
-        [Quality::Small, Quality::Balanced, Quality::High, Quality::Max]
+        [
+            Quality::Small,
+            Quality::Balanced,
+            Quality::High,
+            Quality::Max,
+        ]
     }
 }
 
@@ -191,7 +198,7 @@ impl Default for Settings {
             out_dir: dirs_desktop(),
             line: true,
             line_hover: true,
-            markup: true,
+            markup: false,
             update_check: true,
             permissions_prompted: false,
             hotkeys: Hotkeys::default(),
@@ -213,7 +220,7 @@ const KEY_PERMISSIONS_PROMPTED: &str = "permissionsPrompted";
 const KEY_HOTKEYS: [&str; 4] = ["hotkey1", "hotkey2", "hotkey3", "hotkey4"];
 
 pub fn load_persisted(settings: &mut Settings) {
-    use objc2_foundation::{NSUserDefaults, NSString};
+    use objc2_foundation::{NSString, NSUserDefaults};
     let defaults = NSUserDefaults::standardUserDefaults();
     if let Some(dir) = defaults.stringForKey(&NSString::from_str(KEY_OUT_DIR)) {
         // Do not touch the filesystem here: probing Desktop/Documents at
@@ -241,7 +248,10 @@ pub fn load_persisted(settings: &mut Settings) {
         settings.scale = scale;
     }
     // 没写过的键默认是 false，所以先看看有没有存过。
-    if defaults.objectForKey(&NSString::from_str(KEY_LINE)).is_some() {
+    if defaults
+        .objectForKey(&NSString::from_str(KEY_LINE))
+        .is_some()
+    {
         settings.line = defaults.boolForKey(&NSString::from_str(KEY_LINE));
     }
     if defaults
@@ -250,7 +260,10 @@ pub fn load_persisted(settings: &mut Settings) {
     {
         settings.line_hover = defaults.boolForKey(&NSString::from_str(KEY_LINE_HOVER));
     }
-    if defaults.objectForKey(&NSString::from_str(KEY_MARKUP)).is_some() {
+    if defaults
+        .objectForKey(&NSString::from_str(KEY_MARKUP))
+        .is_some()
+    {
         settings.markup = defaults.boolForKey(&NSString::from_str(KEY_MARKUP));
     }
     if defaults
@@ -268,8 +281,12 @@ pub fn load_persisted(settings: &mut Settings) {
     }
     for (index, slot) in SLOTS.iter().enumerate() {
         let key = NSString::from_str(KEY_HOTKEYS[index]);
-        let Some(text) = defaults.stringForKey(&key) else { continue };
-        let Some(hotkey) = Hotkey::decode(&text.to_string()) else { continue };
+        let Some(text) = defaults.stringForKey(&key) else {
+            continue;
+        };
+        let Some(hotkey) = Hotkey::decode(&text.to_string()) else {
+            continue;
+        };
         // 存过的才认：没存过时保持默认值，别被空值洗掉。
         if hotkey.is_none() || hotkey.valid() {
             settings.hotkeys.set(*slot, hotkey);
@@ -279,12 +296,11 @@ pub fn load_persisted(settings: &mut Settings) {
 
 pub fn persist(settings: &Settings) {
     use objc2::runtime::AnyObject;
-    use objc2_foundation::{NSUserDefaults, NSString};
+    use objc2_foundation::{NSString, NSUserDefaults};
     let defaults = NSUserDefaults::standardUserDefaults();
     let dir = NSString::from_str(&settings.out_dir.to_string_lossy());
     unsafe {
-        let value: &AnyObject =
-            &*(&*dir as *const NSString as *const AnyObject);
+        let value: &AnyObject = &*(&*dir as *const NSString as *const AnyObject);
         defaults.setObject_forKey(Some(value), &NSString::from_str(KEY_OUT_DIR));
     }
     let audio = AudioSource::all()
@@ -302,10 +318,7 @@ pub fn persist(settings: &Settings) {
     defaults.setBool_forKey(settings.line, &NSString::from_str(KEY_LINE));
     defaults.setBool_forKey(settings.line_hover, &NSString::from_str(KEY_LINE_HOVER));
     defaults.setBool_forKey(settings.markup, &NSString::from_str(KEY_MARKUP));
-    defaults.setBool_forKey(
-        settings.update_check,
-        &NSString::from_str(KEY_UPDATE_CHECK),
-    );
+    defaults.setBool_forKey(settings.update_check, &NSString::from_str(KEY_UPDATE_CHECK));
     defaults.setBool_forKey(
         settings.permissions_prompted,
         &NSString::from_str(KEY_PERMISSIONS_PROMPTED),
@@ -384,7 +397,9 @@ pub fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> R {
 pub fn log(message: &str) {
     use std::io::Write as _;
     eprintln!("iRec: {message}");
-    let Ok(home) = std::env::var("HOME") else { return };
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
     let path = std::path::PathBuf::from(home).join("Library/Logs/irec.log");
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)

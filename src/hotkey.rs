@@ -149,6 +149,47 @@ impl Hotkey {
         out
     }
 
+    /// Use AppKit's shortcut column rather than embedding spacing in the title.
+    pub fn apply_to_menu(self, item: &objc2_app_kit::NSMenuItem) {
+        let name = key_name(self.key_code);
+        let key = match name.as_str() {
+            "↩" => "\r".to_string(),
+            "⇥" => "\t".to_string(),
+            "␣" => " ".to_string(),
+            "⌫" => "\u{8}".to_string(),
+            "⎋" => "\u{1b}".to_string(),
+            "←" => "\u{f702}".to_string(),
+            "→" => "\u{f703}".to_string(),
+            "↓" => "\u{f701}".to_string(),
+            "↑" => "\u{f700}".to_string(),
+            n if n.starts_with('F') && n.len() > 1 => n[1..]
+                .parse::<u32>()
+                .ok()
+                .and_then(|n| char::from_u32(0xf703 + n))
+                .map(|c| c.to_string())
+                .unwrap_or_default(),
+            n if n.chars().count() == 1 => n.to_lowercase(),
+            _ => String::new(),
+        };
+        item.setKeyEquivalent(&objc2_foundation::NSString::from_str(if self.is_none() {
+            ""
+        } else {
+            &key
+        }));
+        let mut flags = NSEventModifierFlags::empty();
+        for (carbon, native) in [
+            (CMD_KEY, NSEventModifierFlags::Command),
+            (SHIFT_KEY, NSEventModifierFlags::Shift),
+            (OPT_KEY, NSEventModifierFlags::Option),
+            (CTRL_KEY, NSEventModifierFlags::Control),
+        ] {
+            if self.modifiers & carbon != 0 {
+                flags |= native;
+            }
+        }
+        item.setKeyEquivalentModifierMask(flags);
+    }
+
     /// 存进 NSUserDefaults 的形式：`修饰键:键码`。
     pub fn encode(self) -> String {
         format!("{}:{}", self.modifiers, self.key_code)

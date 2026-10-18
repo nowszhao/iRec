@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{AnyThread, ClassType, define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2::{AnyThread, ClassType, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezierPath,
     NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSBorderType, NSButton, NSCellImagePosition,
@@ -25,7 +25,7 @@ use objc2_core_graphics::{
     CGContextScaleCTM, CGImage, CGImageAlphaInfo,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSMutableDictionary, NSDictionary, NSObject, NSObjectProtocol, NSPoint,
+    MainThreadMarker, NSDictionary, NSMutableDictionary, NSObject, NSObjectProtocol, NSPoint,
     NSRect, NSSize, NSString,
 };
 
@@ -459,7 +459,10 @@ impl CanvasView {
         let w = size.width * scale;
         let h = size.height * scale;
         NSRect::new(
-            NSPoint::new((bounds.size.width - w) / 2.0, (bounds.size.height - h) / 2.0),
+            NSPoint::new(
+                (bounds.size.width - w) / 2.0,
+                (bounds.size.height - h) / 2.0,
+            ),
             NSSize::new(w, h),
         )
     }
@@ -492,7 +495,7 @@ impl CanvasView {
     }
 
     fn paint(&self, dirty: NSRect) {
-        NSColor::colorWithSRGBRed_green_blue_alpha(0.11, 0.11, 0.12, 1.0).setFill();
+        NSColor::underPageBackgroundColor().setFill();
         unsafe { NSBezierPath::fillRect(dirty) };
         let r = self.image_rect();
         if let Some(image) = self.ivars().image.borrow().as_ref() {
@@ -653,11 +656,13 @@ impl CanvasView {
         };
         let (r, g, b) = COLORS[self.ivars().color.get().min(COLORS.len() - 1)];
         field.setFont(Some(&NSFont::systemFontOfSize(18.0)));
-        field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0)));
+        field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            r, g, b, 1.0,
+        )));
         field.setDrawsBackground(true);
-        field.setBackgroundColor(Some(
-            &NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.9),
-        ));
+        field.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            1.0, 1.0, 1.0, 0.9,
+        )));
         field.setBezeled(false);
         field.setPlaceholderString(Some(&NSString::from_str("输入文字，回车确认")));
         unsafe { field.setAction(Some(sel!(commitText:))) };
@@ -766,9 +771,9 @@ impl NSShadowForMarkup {
     fn new() -> Self {
         let shadow = unsafe { objc2_app_kit::NSShadow::new() };
         unsafe {
-            shadow.setShadowColor(Some(
-                &NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.45),
-            ));
+            shadow.setShadowColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+                0.0, 0.0, 0.0, 0.45,
+            )));
             shadow.setShadowOffset(NSSize::new(0.0, -6.0));
             shadow.setShadowBlurRadius(18.0);
         }
@@ -800,9 +805,9 @@ define_class!(
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _rect: NSRect) {
             let bounds = self.bounds();
-            NSColor::colorWithSRGBRed_green_blue_alpha(0.16, 0.16, 0.17, 1.0).setFill();
+            NSColor::windowBackgroundColor().setFill();
             unsafe { NSBezierPath::fillRect(bounds) };
-            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.08).setStroke();
+            NSColor::separatorColor().setStroke();
             let line = NSBezierPath::bezierPath();
             line.setLineWidth(1.0);
             line.moveToPoint(NSPoint::new(0.0, bounds.size.height - 0.5));
@@ -818,7 +823,7 @@ define_class!(
                 6.0,
                 6.0,
             );
-            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.16).setFill();
+            NSColor::controlAccentColor().colorWithAlphaComponent(0.18).setFill();
             mark.fill();
             let color = self.ivars().color.get();
             let ring = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
@@ -826,7 +831,7 @@ define_class!(
                 NSSize::new(22.0, 22.0),
             ));
             ring.setLineWidth(2.0);
-            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.95).setStroke();
+            NSColor::labelColor().setStroke();
             ring.stroke();
         }
     }
@@ -909,10 +914,7 @@ fn tool_icon(index: usize) -> Retained<NSImage> {
                         ProtocolObject::from_ref(NSForegroundColorAttributeName),
                     );
                     let string = NSString::from_str("T");
-                    string.drawAtPoint_withAttributes(
-                        NSPoint::new(6.5, y(17.0)),
-                        Some(&attrs),
-                    );
+                    string.drawAtPoint_withAttributes(NSPoint::new(6.5, y(17.0)), Some(&attrs));
                 }
             }
             _ => {}
@@ -928,8 +930,7 @@ fn undo_icon() -> Retained<NSImage> {
     let size = 22.0;
     let block = RcBlock::new(move |_rect: NSRect| -> objc2::runtime::Bool {
         let white = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.92);
-        let attrs: Retained<NSMutableDictionary<NSString, AnyObject>> =
-            NSMutableDictionary::new();
+        let attrs: Retained<NSMutableDictionary<NSString, AnyObject>> = NSMutableDictionary::new();
         unsafe {
             let font = NSFont::systemFontOfSize(16.0);
             let object: &AnyObject = &*font;
@@ -962,6 +963,7 @@ fn icon_button(
     button.setImagePosition(NSCellImagePosition::ImageOnly);
     button.setBordered(false);
     button.setToolTip(Some(&NSString::from_str(tip)));
+    button.setContentTintColor(Some(&NSColor::labelColor()));
     unsafe { button.setAction(Some(action)) };
     unsafe { button.setTarget(Some(target)) };
     button.setTag(tag);
@@ -997,6 +999,9 @@ fn color_button(
     unsafe { button.setAction(Some(sel!(colorClicked:))) };
     unsafe { button.setTarget(Some(target)) };
     button.setTag(index as isize);
+    button.setToolTip(Some(&NSString::from_str(
+        ["红色", "黄色", "蓝色", "绿色"][index],
+    )));
     button
 }
 
@@ -1023,9 +1028,8 @@ fn text_button(
 
 /// 把标记画进原图的像素里，尺寸和原图一致。
 fn compose(image: &NSImage, marks: &[Mark]) -> Option<CFRetained<CGImage>> {
-    let source: Retained<CGImage> = unsafe {
-        image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None)
-    }?;
+    let source: Retained<CGImage> =
+        unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }?;
     let w = CGImage::width(Some(&source));
     let h = CGImage::height(Some(&source));
     if w == 0 || h == 0 {
@@ -1033,9 +1037,8 @@ fn compose(image: &NSImage, marks: &[Mark]) -> Option<CFRetained<CGImage>> {
     }
     let space = CGColorSpace::new_device_rgb()?;
     let info = CGBitmapInfo::ByteOrder32Big.bits() | CGImageAlphaInfo::PremultipliedLast.0;
-    let ctx = unsafe {
-        CGBitmapContextCreate(std::ptr::null_mut(), w, h, 8, 0, Some(&space), info)
-    }?;
+    let ctx =
+        unsafe { CGBitmapContextCreate(std::ptr::null_mut(), w, h, 8, 0, Some(&space), info) }?;
     let size = image.size();
     let sx = if size.width > 0.0 {
         w as f64 / size.width
@@ -1085,10 +1088,8 @@ fn paint_into(marks: &[Mark], size: NSSize) {
                 }
             }
             Kind::Rect { x, y, w, h } => {
-                let rect = NSRect::new(
-                    NSPoint::new(*x, size.height - *y - *h),
-                    NSSize::new(*w, *h),
-                );
+                let rect =
+                    NSRect::new(NSPoint::new(*x, size.height - *y - *h), NSSize::new(*w, *h));
                 let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, 3.0, 3.0);
                 path.setLineWidth(LINE_W);
                 path.stroke();
@@ -1138,7 +1139,9 @@ fn write_png(cg: &CGImage, path: &std::path::Path) -> Result<(), String> {
 
 /// 打开标注窗口。`on_saved` 在写回原文件后调用（取消则不调用）。
 pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
-    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
     let Some(image) = NSImage::initWithContentsOfFile(
         NSImage::alloc(),
         &NSString::from_str(&path.to_string_lossy()),
@@ -1166,18 +1169,18 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(view_w, view_h + BAR_H),
-            ),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(view_w, view_h + BAR_H)),
             NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
             NSBackingStoreType::Buffered,
             false,
         )
     };
     unsafe { window.setReleasedWhenClosed(false) };
-    window.setTitle(&NSString::from_str("标注"));
-    let Some(content) = window.contentView() else { return };
+    window.setTitle(&NSString::from_str("标注截图"));
+    window.setSharingType(objc2_app_kit::NSWindowSharingType::None);
+    let Some(content) = window.contentView() else {
+        return;
+    };
 
     let canvas = CanvasView::new(mtm);
     canvas.setFrame(NSRect::new(
@@ -1186,10 +1189,7 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
     ));
     let scroll = NSScrollView::initWithFrame(
         NSScrollView::alloc(mtm),
-        NSRect::new(
-            NSPoint::new(0.0, BAR_H),
-            NSSize::new(view_w, view_h),
-        ),
+        NSRect::new(NSPoint::new(0.0, BAR_H), NSSize::new(view_w, view_h)),
     );
     scroll.setBorderType(NSBorderType::NoBorder);
     scroll.setScrollerStyle(NSScrollerStyle::Overlay);
@@ -1197,9 +1197,7 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
     scroll.setHasHorizontalScroller(false);
     scroll.setAutohidesScrollers(true);
     scroll.setDrawsBackground(true);
-    scroll.setBackgroundColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
-        0.11, 0.11, 0.12, 1.0,
-    ));
+    scroll.setBackgroundColor(&NSColor::underPageBackgroundColor());
     scroll.setDocumentView(Some(&canvas));
     content.addSubview(&scroll);
 
@@ -1213,13 +1211,20 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
         ("rectangle", "框图"),
         ("textformat", "文字"),
     ];
-    for (index, (_symbol, tip)) in tools.iter().enumerate() {
-        let image = tool_icon(index);
+    for (index, (symbol, tip)) in tools.iter().enumerate() {
+        let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str(symbol),
+            Some(&NSString::from_str(tip)),
+        )
+        .unwrap_or_else(|| tool_icon(index));
         let button = icon_button(
             mtm,
             &image,
             tip,
-            NSRect::new(NSPoint::new(14.0 + index as f64 * 38.0, 9.0), NSSize::new(30.0, 28.0)),
+            NSRect::new(
+                NSPoint::new(14.0 + index as f64 * 38.0, 9.0),
+                NSSize::new(30.0, 28.0),
+            ),
             sel!(toolClicked:),
             &canvas,
             index as isize,
@@ -1239,7 +1244,11 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
     }
     bar.addSubview(&icon_button(
         mtm,
-        &undo_icon(),
+        &NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("arrow.uturn.backward"),
+            Some(&NSString::from_str("撤销")),
+        )
+        .unwrap_or_else(undo_icon),
         "撤销",
         NSRect::new(NSPoint::new(view_w - 210.0, 9.0), NSSize::new(30.0, 28.0)),
         sel!(undoMark:),
@@ -1258,7 +1267,7 @@ pub fn edit(path: PathBuf, on_saved: impl FnOnce(PathBuf) + 'static) {
     bar.addSubview(&cancel);
     let done = text_button(
         mtm,
-        "完成",
+        "保存",
         NSRect::new(NSPoint::new(view_w - 88.0, 8.0), NSSize::new(72.0, 30.0)),
         sel!(doneEdit:),
         &canvas,

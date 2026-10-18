@@ -7,6 +7,7 @@ mod markup;
 mod mic;
 mod overlay;
 mod permissions;
+mod preview;
 mod recorder;
 mod scrollpreview;
 mod scrollshot;
@@ -15,61 +16,46 @@ mod state;
 mod update;
 
 use std::cell::{OnceCell, RefCell};
-use std::sync::Mutex;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::AnyThread;
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSBackingStoreType, NSBezierPath, NSButton, NSButtonType, NSColor,
-    NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSFont, NSImage, NSMenu, NSMenuItem,
-    NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSStatusBar, NSStatusItem, NSTextField, NSView,
-    NSWindow, NSWindowStyleMask, NSWorkspace,
+    NSEvent, NSFont, NSImage, NSMenu, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSPopUpButton,
+    NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSArray, NSBundle, NSNotification, NSObject, NSObjectProtocol,
-    NSPoint, NSRect, NSSize, NSString, NSURL,
+    MainThreadMarker, NSArray, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSPoint,
+    NSRect, NSSize, NSString, NSURL, ns_string,
 };
 
 use crate::hotkey::{Hotkey, Hotkeys, KVK_DELETE, KVK_ESCAPE, SLOTS};
 use crate::overlay::pick_region;
 use crate::recorder::Recorder;
 use crate::state::{
-    dirs_desktop, init_state, load_persisted, log, persist, push_action, with_state, Action,
-    AppState, AudioSource, Quality, Rect, ScrollShotResult, Settings, Update, STATE,
+    Action, AppState, AudioSource, Quality, Rect, STATE, ScrollShotResult, Settings, Update,
+    dirs_desktop, init_state, load_persisted, log, persist, push_action, with_state,
 };
 
 #[derive(Default)]
 struct AppIvars {
     status_item: OnceCell<Retained<NSStatusItem>>,
-    audio_items: RefCell<Vec<(usize, Retained<NSMenuItem>)>>,
-    quality_items: RefCell<Vec<(usize, Retained<NSMenuItem>)>>,
-    fps_items: RefCell<Vec<(i32, Retained<NSMenuItem>)>>,
-    scale_items: RefCell<Vec<(i32, Retained<NSMenuItem>)>>,
-    last_file: OnceCell<Retained<NSMenuItem>>,
+    status_logo: OnceCell<Retained<NSImage>>,
     status_line: OnceCell<Retained<NSMenuItem>>,
     window: OnceCell<Retained<NSWindow>>,
     status_label: OnceCell<Retained<NSTextField>>,
     audio_popup: OnceCell<Retained<NSPopUpButton>>,
-    out_dir_item: OnceCell<Retained<NSMenuItem>>,
     out_dir_button: OnceCell<Retained<NSButton>>,
-    start_button: OnceCell<Retained<NSButton>>,
-    region_button: OnceCell<Retained<NSButton>>,
-    stop_button: OnceCell<Retained<NSButton>>,
-    stop_menu_item: OnceCell<Retained<NSMenuItem>>,
     line_toggle_item: OnceCell<Retained<NSMenuItem>>,
-    line_hover_item: OnceCell<Retained<NSMenuItem>>,
-    line_enable_item: OnceCell<Retained<NSMenuItem>>,
-    annotate_item: OnceCell<Retained<NSMenuItem>>,
-    markup_item: OnceCell<Retained<NSMenuItem>>,
     update_item: OnceCell<Retained<NSMenuItem>>,
-    update_check_item: OnceCell<Retained<NSMenuItem>>,
     start_menu_item: OnceCell<Retained<NSMenuItem>>,
     region_menu_item: OnceCell<Retained<NSMenuItem>>,
     shot_full_item: OnceCell<Retained<NSMenuItem>>,
@@ -81,6 +67,7 @@ struct AppIvars {
     hotkey_fields: RefCell<Vec<Retained<NSTextField>>>,
     capture_panel: OnceCell<Retained<NSWindow>>,
     capture_view: OnceCell<Retained<CaptureView>>,
+    setting_checks: RefCell<Vec<(u8, Retained<NSButton>)>>,
 }
 
 define_class!(
@@ -93,6 +80,14 @@ define_class!(
 
     // SAFETY: `NSApplicationDelegate` has no safety requirements.
     unsafe impl NSApplicationDelegate for AppDelegate {
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn reopen(&self, _: &NSApplication, _: bool) -> bool {
+            if let Some(window) = self.ivars().window.get() {
+                window.makeKeyAndOrderFront(None);
+            }
+            false
+        }
+
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
             // Deliberately no CGRequestScreenCaptureAccess() here: preflight is
@@ -327,7 +322,7 @@ define_class!(
             panel.setCanChooseFiles(false);
             panel.setCanCreateDirectories(true);
             panel.setPrompt(Some(&NSString::from_str("选择")));
-            panel.setMessage(Some(&NSString::from_str("录制的视频会保存到这个位置")));
+            panel.setMessage(Some(&NSString::from_str("截图和录屏会保存到这个位置")));
             if panel.runModal() == NSModalResponseOK {
                 if let Some(url) = panel.URL() {
                     if let Some(path) = url.path() {
@@ -463,7 +458,9 @@ impl AppDelegate {
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
         if let Some(button) = item.button(mtm) {
             button.setTitle(ns_string!("REC"));
-            button.setImage(Some(&status_icon(mtm, false)));
+            let logo = status_icon();
+            button.setImage(Some(&logo));
+            self.ivars().status_logo.set(logo).ok();
         }
         item.setMenu(Some(&self.build_menu(mtm)));
         self.ivars().status_item.set(item).ok();
@@ -486,457 +483,277 @@ impl AppDelegate {
         std::mem::forget(timer);
     }
 
-    /// Builds the control window: buttons, quality pickers and live status.
-    ///
-    /// 高度由每段的高度相加得出，不再写死 —— 之前加控件时忘了加高度，
-    /// 最后一行被排到了窗口外面。
+    /// Preferences use native controls; capture actions stay in the menu/HUD.
     fn build_window(&self, mtm: MainThreadMarker) -> Retained<NSWindow> {
-        let width = 380.0;
-        let pad: f64 = 18.0;
-        let group: f64 = 14.0;
-        let bands: [f64; 19] = [
-            26.0,  // 标题
-            group,
-            34.0,  // 开始录制（全屏）
-            34.0,  // 选择区域录制
-            34.0,  // 停止录制
-            group,
-            20.0,  // 「参数」小标题
-            30.0,  // 声音
-            30.0,  // 画质
-            30.0,  // 帧率
-            30.0,  // 分辨率
-            group,
-            20.0,  // 「输出」小标题
-            32.0,  // 保存位置
-            32.0,  // 快捷键
-            group,
-            22.0,  // 状态行
-            12.0,
-            32.0,  // 在访达中显示 / 申请检查权限
-        ];
-        let height: f64 = bands.iter().sum::<f64>() + pad * 2.0;
-        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height));
+        let settings = with_state(|s| s.settings.clone());
+        let width = 480.0;
+        let height = 610.0;
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
-                frame,
-                NSWindowStyleMask::Titled
-                    | NSWindowStyleMask::Closable
-                    | NSWindowStyleMask::Miniaturizable,
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height)),
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
                 NSBackingStoreType::Buffered,
                 false,
             )
         };
-        unsafe { window.setReleasedWhenClosed(false) };
-        window.setSharingType(objc2_app_kit::NSWindowSharingType(0));
-        window.setTitle(ns_string!("iRec"));
-        let content = window.contentView().expect("content view");
-        let inner = width - pad * 2.0;
-        let mut y = height - pad;
-
-        y -= bands[0];
-        let title = make_label(
-            mtm,
-            "iRec · 屏幕录制与截图",
-            NSRect::new(NSPoint::new(pad, y + 2.0), NSSize::new(inner, 22.0)),
-            15.0,
-        );
-        title.setFont(Some(&NSFont::boldSystemFontOfSize(15.0)));
-        content.addSubview(&title);
-
-        y -= bands[1];
-
-        y -= bands[2];
-        let start = make_button(
-            mtm,
-            "开始录制（全屏）",
-            sel!(startFull:),
-            NSRect::new(NSPoint::new(pad, y + 1.0), NSSize::new(inner, 32.0)),
-            self,
-        );
-        content.addSubview(&start);
-        self.ivars().start_button.set(start).ok();
-
-        y -= bands[3];
-        let region = make_button(
-            mtm,
-            "选择区域录制",
-            sel!(pickRegion:),
-            NSRect::new(NSPoint::new(pad, y + 1.0), NSSize::new(inner, 32.0)),
-            self,
-        );
-        content.addSubview(&region);
-        self.ivars().region_button.set(region).ok();
-
-        y -= bands[4];
-        let stop = make_button(
-            mtm,
-            "停止录制",
-            sel!(stopRecording:),
-            NSRect::new(NSPoint::new(pad, y + 1.0), NSSize::new(inner, 32.0)),
-            self,
-        );
-        content.addSubview(&stop);
-        self.ivars().stop_button.set(stop).ok();
-
-        y -= bands[5];
-        y -= bands[6];
-        content.addSubview(&section_label(
-            mtm,
-            "参数",
-            NSRect::new(NSPoint::new(pad, y), NSSize::new(inner, 16.0)),
-        ));
-
-        y -= bands[7];
-        content.addSubview(&make_label(
-            mtm,
-            "声音",
-            NSRect::new(NSPoint::new(pad, y + 4.0), NSSize::new(72.0, 18.0)),
-            13.0,
-        ));
+        unsafe {
+            window.setReleasedWhenClosed(false);
+        }
+        window.setTitle(ns_string!("iRec 设置"));
+        window.setSharingType(objc2_app_kit::NSWindowSharingType::None);
+        let content = window.contentView().expect("settings content");
+        let heading = |title: &str, y: f64| {
+            let label = make_label(
+                mtm,
+                title,
+                NSRect::new(NSPoint::new(24.0, y), NSSize::new(430.0, 22.0)),
+                13.0,
+            );
+            label.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
+            content.addSubview(&label);
+        };
+        heading("捕获", 566.0);
         let audio_titles: Vec<&str> = AudioSource::all().iter().map(|a| a.label()).collect();
-        let audio = make_popup(
-            mtm,
-            &audio_titles,
-            NSRect::new(NSPoint::new(pad + 80.0, y + 2.0), NSSize::new(inner - 80.0, 26.0)),
-            sel!(audioChanged:),
-            self,
-            1,
-        );
-        content.addSubview(&audio);
-        self.ivars().audio_popup.set(audio).ok();
-
-        y -= bands[8];
-        content.addSubview(&make_label(
-            mtm,
-            "画质",
-            NSRect::new(NSPoint::new(pad, y + 4.0), NSSize::new(72.0, 18.0)),
-            13.0,
-        ));
-        let quality = make_popup(
-            mtm,
-            &[
-                Quality::Small.label(),
-                Quality::Balanced.label(),
-                Quality::High.label(),
-                Quality::Max.label(),
-            ],
-            NSRect::new(NSPoint::new(pad + 80.0, y + 2.0), NSSize::new(inner - 80.0, 26.0)),
-            sel!(qualityChanged:),
-            self,
-            1,
-        );
-        content.addSubview(&quality);
-
-        y -= bands[9];
-        content.addSubview(&make_label(
-            mtm,
-            "帧率",
-            NSRect::new(NSPoint::new(pad, y + 4.0), NSSize::new(72.0, 18.0)),
-            13.0,
-        ));
-        let fps = make_popup(
-            mtm,
-            &["30 fps（省空间）", "60 fps（流畅）"],
-            NSRect::new(NSPoint::new(pad + 80.0, y + 2.0), NSSize::new(inner - 80.0, 26.0)),
-            sel!(fpsChanged:),
-            self,
-            0,
-        );
-        content.addSubview(&fps);
-
-        y -= bands[10];
-        content.addSubview(&make_label(
-            mtm,
-            "分辨率",
-            NSRect::new(NSPoint::new(pad, y + 4.0), NSSize::new(72.0, 18.0)),
-            13.0,
-        ));
-        let scale = make_popup(
-            mtm,
-            &["1x（省空间）", "2x（高清，默认）"],
-            NSRect::new(NSPoint::new(pad + 80.0, y + 2.0), NSSize::new(inner - 80.0, 26.0)),
-            sel!(scaleChanged:),
-            self,
-            1,
-        );
-        content.addSubview(&scale);
-
-        y -= bands[11];
-        y -= bands[12];
-        content.addSubview(&section_label(
-            mtm,
-            "输出",
-            NSRect::new(NSPoint::new(pad, y), NSSize::new(inner, 16.0)),
-        ));
-
-        y -= bands[13];
+        let quality_titles: Vec<&str> = Quality::all().iter().map(|q| q.label()).collect();
+        let rows = [
+            (
+                "声音",
+                audio_titles,
+                sel!(audioChanged:),
+                AudioSource::all()
+                    .iter()
+                    .position(|a| *a == settings.audio)
+                    .unwrap_or(1),
+            ),
+            (
+                "画质",
+                quality_titles,
+                sel!(qualityChanged:),
+                Quality::all()
+                    .iter()
+                    .position(|q| *q == settings.quality)
+                    .unwrap_or(1),
+            ),
+            (
+                "帧率",
+                vec!["30 fps · 省空间", "60 fps · 更流畅"],
+                sel!(fpsChanged:),
+                usize::from(settings.fps == 60),
+            ),
+            (
+                "分辨率",
+                vec!["1x · 标准", "2x · 高清"],
+                sel!(scaleChanged:),
+                usize::from(settings.scale > 1.5),
+            ),
+        ];
+        for (i, (label, values, action, selected)) in rows.into_iter().enumerate() {
+            let y = 528.0 - i as f64 * 34.0;
+            content.addSubview(&make_label(
+                mtm,
+                label,
+                NSRect::new(NSPoint::new(24.0, y + 3.0), NSSize::new(100.0, 20.0)),
+                13.0,
+            ));
+            let popup = make_popup(
+                mtm,
+                &values,
+                NSRect::new(NSPoint::new(148.0, y), NSSize::new(308.0, 26.0)),
+                action,
+                self,
+                selected as isize,
+            );
+            content.addSubview(&popup);
+            if i == 0 {
+                self.ivars().audio_popup.set(popup).ok();
+            }
+        }
         let out_dir = make_button(
             mtm,
-            "保存位置：选择…",
+            "保存位置…",
             sel!(chooseOutputDir:),
-            NSRect::new(NSPoint::new(pad, y), NSSize::new(inner, 30.0)),
+            NSRect::new(NSPoint::new(20.0, 383.0), NSSize::new(440.0, 30.0)),
             self,
         );
         content.addSubview(&out_dir);
         self.ivars().out_dir_button.set(out_dir).ok();
-
-        y -= bands[14];
-        let hotkeys = make_button(
+        heading("晾衣绳与截图", 345.0);
+        for (id, label, action, checked, y) in [
+            (
+                0,
+                "将截图和录屏挂到晾衣绳",
+                sel!(toggleLineEnabled:),
+                settings.line,
+                316.0,
+            ),
+            (
+                1,
+                "悬停在 iRec 图标时展开",
+                sel!(toggleLineHover:),
+                settings.line_hover,
+                288.0,
+            ),
+            (
+                2,
+                "截图后直接打开标注",
+                sel!(toggleMarkup:),
+                settings.markup,
+                260.0,
+            ),
+            (
+                3,
+                "自动检查更新",
+                sel!(toggleUpdateCheck:),
+                settings.update_check,
+                170.0,
+            ),
+        ] {
+            let button = make_button(
+                mtm,
+                label,
+                action,
+                NSRect::new(NSPoint::new(24.0, y), NSSize::new(360.0, 24.0)),
+                self,
+            );
+            button.setButtonType(NSButtonType::Switch);
+            button.setState(state_value(checked));
+            content.addSubview(&button);
+            self.ivars().setting_checks.borrow_mut().push((id, button));
+        }
+        let clear = make_button(
             mtm,
-            "快捷键设置…",
-            sel!(openHotkeys:),
-            NSRect::new(NSPoint::new(pad, y), NSSize::new(inner, 30.0)),
+            "移除全部卡片（保留文件）",
+            sel!(clearLine:),
+            NSRect::new(NSPoint::new(20.0, 222.0), NSSize::new(260.0, 28.0)),
             self,
         );
-        content.addSubview(&hotkeys);
-
-        y -= bands[15];
-        y -= bands[16];
+        content.addSubview(&clear);
+        heading(&format!("通用 · iRec {}", env!("CARGO_PKG_VERSION")), 200.0);
+        for (i, (label, action)) in [
+            ("快捷键…", sel!(openHotkeys:)),
+            ("权限设置…", sel!(checkPermission:)),
+            ("检查更新…", sel!(checkUpdate:)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            content.addSubview(&make_button(
+                mtm,
+                label,
+                action,
+                NSRect::new(
+                    NSPoint::new(20.0 + i as f64 * 148.0, 124.0),
+                    NSSize::new(144.0, 30.0),
+                ),
+                self,
+            ));
+        }
         let status = section_label(
             mtm,
-            "就绪",
-            NSRect::new(NSPoint::new(pad, y + 2.0), NSSize::new(inner, 18.0)),
+            "",
+            NSRect::new(NSPoint::new(24.0, 50.0), NSSize::new(432.0, 60.0)),
         );
+        status.setMaximumNumberOfLines(3);
         content.addSubview(&status);
         self.ivars().status_label.set(status).ok();
-
-        y -= bands[17];
-        y -= bands[18];
-        let reveal = make_button(
-            mtm,
-            "在访达中显示",
-            sel!(revealLast:),
-            NSRect::new(NSPoint::new(pad, y), NSSize::new(160.0, 30.0)),
-            self,
-        );
-        content.addSubview(&reveal);
-        let permission = make_button(
-            mtm,
-            "权限设置…",
-            sel!(checkPermission:),
-            NSRect::new(NSPoint::new(pad + 168.0, y), NSSize::new(inner - 168.0, 30.0)),
-            self,
-        );
-        content.addSubview(&permission);
-
-        // 排完应该正好落在下边距上：不对就说明 bands 和摆放不一致。
-        log(&format!("window: {width}x{height}, 底部 y={y}（应为 {pad}）"));
         window.center();
         window
     }
 
-    /// Builds the status menu. 动作按「录制 / 截图 / 晾衣绳 / 设置」分成几组，
-    /// 参数类的东西收到「设置」子菜单里，主菜单只留常用项。
+    /// Frequent actions stay at one level; preferences live in their own window.
     fn build_menu(&self, mtm: MainThreadMarker) -> Retained<NSMenu> {
-        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("irec"));
-        // Otherwise AppKit re-enables the stop item on every menu open.
+        let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
-
-        let start = menu_item(mtm, "开始录制（全屏）", Some(sel!(startFull:)), self, 0);
-        menu.addItem(&start);
-        self.ivars().start_menu_item.set(start).ok();
-
-        let region = menu_item(mtm, "选择区域录制", Some(sel!(pickRegion:)), self, 0);
-        menu.addItem(&region);
-        self.ivars().region_menu_item.set(region).ok();
-
-        let stop = menu_item(mtm, "停止录制", Some(sel!(stopRecording:)), self, 0);
-        menu.addItem(&stop);
-        self.ivars().stop_menu_item.set(stop).ok();
-
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-        let shot_full = menu_item(mtm, "截取全屏", Some(sel!(shotFull:)), self, 0);
-        menu.addItem(&shot_full);
-        self.ivars().shot_full_item.set(shot_full).ok();
-
-        let shot_region = menu_item(mtm, "截取选区", Some(sel!(shotRegion:)), self, 0);
-        menu.addItem(&shot_region);
-        self.ivars().shot_region_item.set(shot_region).ok();
-
-        let scroll_shot = menu_item(mtm, "滚动截屏…", Some(sel!(scrollShot:)), self, 0);
-        menu.addItem(&scroll_shot);
-        self.ivars().scroll_shot_item.set(scroll_shot).ok();
-
-        let finish_scroll_shot = menu_item(mtm, "完成滚动截屏", Some(sel!(finishScrollShot:)), self, 0);
-        finish_scroll_shot.setHidden(true);
-        menu.addItem(&finish_scroll_shot);
-        self.ivars().finish_scroll_shot_item.set(finish_scroll_shot).ok();
-
-        let cancel_scroll_shot = menu_item(mtm, "取消滚动截屏", Some(sel!(cancelScrollShot:)), self, 0);
-        cancel_scroll_shot.setHidden(true);
-        menu.addItem(&cancel_scroll_shot);
-        self.ivars().cancel_scroll_shot_item.set(cancel_scroll_shot).ok();
-
-        let annotate = menu_item(mtm, "标注最新截图…", Some(sel!(annotateLast:)), self, 0);
-        menu.addItem(&annotate);
-        self.ivars().annotate_item.set(annotate).ok();
-
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-
-        // 晾衣绳 ▸
-        let line_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("晾衣绳"));
-        let line_toggle = menu_item(mtm, "显示晾衣绳", Some(sel!(toggleLine:)), self, 0);
-        line_menu.addItem(&line_toggle);
-        self.ivars().line_toggle_item.set(line_toggle).ok();
-
-        let line_hover = menu_item(
-            mtm,
-            "指针停在菜单栏时放下",
-            Some(sel!(toggleLineHover:)),
-            self,
-            0,
-        );
-        line_menu.addItem(&line_hover);
-        self.ivars().line_hover_item.set(line_hover).ok();
-
-        let line_enable = menu_item(
-            mtm,
-            "录完自动挂到晾衣绳",
-            Some(sel!(toggleLineEnabled:)),
-            self,
-            0,
-        );
-        line_menu.addItem(&line_enable);
-        self.ivars().line_enable_item.set(line_enable).ok();
-
-        let line_clear = menu_item(mtm, "清空晾衣绳", Some(sel!(clearLine:)), self, 0);
-        line_menu.addItem(&line_clear);
-
-        let line_root = menu_item(mtm, "晾衣绳", None, self, 0);
-        menu.addItem(&line_root);
-        menu.setSubmenu_forItem(Some(&line_menu), &line_root);
-
-        // 设置 ▸
-        let settings = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("设置"));
-
-        let audio_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("声音"));
-        for (index, source) in AudioSource::all().iter().enumerate() {
-            let item = menu_item(
-                mtm,
-                source.label(),
-                Some(sel!(setAudioSource:)),
-                self,
-                index as i64,
+        for (label, action, symbol, slot) in [
+            (
+                "截取区域…",
+                sel!(shotRegion:),
+                "viewfinder",
+                &self.ivars().shot_region_item,
+            ),
+            (
+                "截取全屏",
+                sel!(shotFull:),
+                "display",
+                &self.ivars().shot_full_item,
+            ),
+            (
+                "滚动截图…",
+                sel!(scrollShot:),
+                "rectangle.portrait",
+                &self.ivars().scroll_shot_item,
+            ),
+            (
+                "完成滚动截图",
+                sel!(finishScrollShot:),
+                "checkmark",
+                &self.ivars().finish_scroll_shot_item,
+            ),
+            (
+                "取消滚动截图",
+                sel!(cancelScrollShot:),
+                "xmark",
+                &self.ivars().cancel_scroll_shot_item,
+            ),
+        ] {
+            let item = menu_item(mtm, label, Some(action), self, 0);
+            item.setImage(
+                NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str(symbol),
+                    None,
+                )
+                .as_deref(),
             );
-            audio_menu.addItem(&item);
-            self.ivars().audio_items.borrow_mut().push((index, item));
+            item.setHidden(label.starts_with("完成") || label.starts_with("取消"));
+            menu.addItem(&item);
+            slot.set(item).ok();
         }
-        let audio_root = menu_item(mtm, "声音", None, self, 0);
-        settings.addItem(&audio_root);
-        settings.setSubmenu_forItem(Some(&audio_menu), &audio_root);
-
-        let quality_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("画质"));
-        for (index, quality) in Quality::all().iter().enumerate() {
-            let item = menu_item(
-                mtm,
-                quality.label(),
-                Some(sel!(setQuality:)),
-                self,
-                index as i64,
-            );
-            quality_menu.addItem(&item);
-            self.ivars().quality_items.borrow_mut().push((index, item));
-        }
-        let quality_root = menu_item(mtm, "画质", None, self, 0);
-        settings.addItem(&quality_root);
-        settings.setSubmenu_forItem(Some(&quality_menu), &quality_root);
-
-        let fps_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("帧率"));
-        for fps in [30i32, 60i32] {
-            let item = menu_item(
-                mtm,
-                &format!("{fps} fps"),
-                Some(sel!(setFps:)),
-                self,
-                fps as i64,
-            );
-            fps_menu.addItem(&item);
-            self.ivars().fps_items.borrow_mut().push((fps, item));
-        }
-        let fps_root = menu_item(mtm, "帧率", None, self, 0);
-        settings.addItem(&fps_root);
-        settings.setSubmenu_forItem(Some(&fps_menu), &fps_root);
-
-        let scale_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("分辨率"));
-        for scale in [10i32, 20i32] {
-            let label = if scale == 20 { "2x（高清，默认）" } else { "1x（省空间）" };
-            let item = menu_item(mtm, label, Some(sel!(setScale:)), self, scale as i64);
-            scale_menu.addItem(&item);
-            self.ivars().scale_items.borrow_mut().push((scale, item));
-        }
-        let scale_root = menu_item(mtm, "分辨率", None, self, 0);
-        settings.addItem(&scale_root);
-        settings.setSubmenu_forItem(Some(&scale_menu), &scale_root);
-
-        settings.addItem(&NSMenuItem::separatorItem(mtm));
-        let out_dir_item = menu_item(mtm, "保存位置：—", None, self, 0);
-        out_dir_item.setEnabled(false);
-        settings.addItem(&out_dir_item);
-        self.ivars().out_dir_item.set(out_dir_item).ok();
-
-        let choose = menu_item(mtm, "选择保存位置…", Some(sel!(chooseOutputDir:)), self, 0);
-        settings.addItem(&choose);
-        let reset_dir = menu_item(mtm, "恢复为桌面", Some(sel!(resetOutputDir:)), self, 0);
-        settings.addItem(&reset_dir);
-
-        settings.addItem(&NSMenuItem::separatorItem(mtm));
-        let hotkeys = menu_item(mtm, "快捷键设置…", Some(sel!(openHotkeys:)), self, 0);
-        settings.addItem(&hotkeys);
-        let markup = menu_item(mtm, "截图后打开标注", Some(sel!(toggleMarkup:)), self, 0);
-        settings.addItem(&markup);
-        self.ivars().markup_item.set(markup).ok();
-
-        let settings_root = menu_item(mtm, "设置", None, self, 0);
-        menu.addItem(&settings_root);
-        menu.setSubmenu_forItem(Some(&settings), &settings_root);
-
-        let reveal = menu_item(mtm, "在访达中显示最新录制", Some(sel!(revealLast:)), self, 0);
-        menu.addItem(&reveal);
-        self.ivars().last_file.set(reveal).ok();
-
-        let open_window = menu_item(mtm, "打开控制窗口…", Some(sel!(showWindow:)), self, 0);
-        menu.addItem(&open_window);
-
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        let permission = menu_item(
-            mtm,
-            "权限设置…",
-            Some(sel!(checkPermission:)),
-            self,
-            0,
-        );
-        menu.addItem(&permission);
-
-        let check_update = menu_item(mtm, "检查更新…", Some(sel!(checkUpdate:)), self, 0);
-        menu.addItem(&check_update);
-
-        let auto_update = menu_item(
-            mtm,
-            "启动时检查更新",
-            Some(sel!(toggleUpdateCheck:)),
-            self,
-            0,
-        );
-        menu.addItem(&auto_update);
-        self.ivars().update_check_item.set(auto_update).ok();
-
-        let update_item =
-            menu_item(mtm, "↑ 发现新版本，点此更新", Some(sel!(installUpdate:)), self, 0);
-        update_item.setHidden(true);
-        menu.addItem(&update_item);
-        self.ivars().update_item.set(update_item).ok();
-
-        let status_line = menu_item(mtm, "就绪", None, self, 0);
-        status_line.setHidden(true);
-        menu.addItem(&status_line);
-        self.ivars().status_line.set(status_line).ok();
-
+        for (label, action, symbol, slot) in [
+            (
+                "录制全屏",
+                sel!(startFull:),
+                "record.circle",
+                &self.ivars().start_menu_item,
+            ),
+            (
+                "录制区域…",
+                sel!(pickRegion:),
+                "viewfinder",
+                &self.ivars().region_menu_item,
+            ),
+        ] {
+            let item = menu_item(mtm, label, Some(action), self, 0);
+            item.setImage(
+                NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str(symbol),
+                    None,
+                )
+                .as_deref(),
+            );
+            menu.addItem(&item);
+            slot.set(item).ok();
+        }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        let quit = menu_item(mtm, "退出", Some(sel!(quit:)), self, 0);
+        let line = menu_item(mtm, "显示晾衣绳", Some(sel!(toggleLine:)), self, 0);
+        menu.addItem(&line);
+        self.ivars().line_toggle_item.set(line).ok();
+        let settings = menu_item(mtm, "设置…", Some(sel!(showWindow:)), self, 0);
+        settings.setKeyEquivalent(ns_string!(","));
+        menu.addItem(&settings);
+        let update = menu_item(mtm, "发现新版本", Some(sel!(installUpdate:)), self, 0);
+        update.setHidden(true);
+        menu.addItem(&update);
+        self.ivars().update_item.set(update).ok();
+        let status = menu_item(mtm, "", None, self, 0);
+        status.setHidden(true);
+        menu.addItem(&status);
+        self.ivars().status_line.set(status).ok();
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        let quit = menu_item(mtm, "退出 iRec", Some(sel!(quit:)), self, 0);
+        quit.setKeyEquivalent(ns_string!("q"));
         menu.addItem(&quit);
-
         menu
     }
 
@@ -998,11 +815,15 @@ impl AppDelegate {
             Action::ShotRegion(rect) => {
                 self.screenshot(Some(rect));
             }
+            Action::ShotRegionAnnotated(rect) => {
+                self.screenshot_with_markup(Some(rect), Some(true));
+            }
             Action::PickScrollShot => match scrollshot::frontmost_target_pid() {
                 Ok(target_pid) => {
                     with_state(|s| {
                         s.last_error = None;
-                        s.scroll_shot_status = Some("请框选页面内容；开始后 iRec 会临时切换到目标应用".to_string());
+                        s.scroll_shot_status =
+                            Some("请框选页面内容；开始后 iRec 会临时切换到目标应用".to_string());
                     });
                     overlay::pick_scroll_region(self.mtm(), target_pid);
                 }
@@ -1023,8 +844,7 @@ impl AppDelegate {
                     scrollpreview::close(self.mtm());
                     with_state(|s| {
                         s.scroll_shot_status = None;
-                        s.last_error =
-                            Some("目标应用已退出，请重新开始滚动截屏".to_string());
+                        s.last_error = Some("目标应用已退出，请重新开始滚动截屏".to_string());
                     });
                 }
             }
@@ -1050,9 +870,7 @@ impl AppDelegate {
                 scrollpreview::close(self.mtm());
                 with_state(|s| s.scroll_shot_status = None);
                 let warning = match &result {
-                    ScrollShotResult::FinishedWithWarning(_, _, warning) => {
-                        Some(warning.clone())
-                    }
+                    ScrollShotResult::FinishedWithWarning(_, _, warning) => Some(warning.clone()),
                     _ => None,
                 };
                 match result {
@@ -1258,9 +1076,7 @@ impl AppDelegate {
             "检查更新"
         }));
         let text = if install {
-            format!(
-                "{message}\n\n发布包是 ad-hoc 签名，换包后屏幕录制权限可能要重新授权一次。"
-            )
+            format!("{message}\n\n发布包是 ad-hoc 签名，换包后屏幕录制权限可能要重新授权一次。")
         } else {
             message.to_string()
         };
@@ -1493,7 +1309,9 @@ impl AppDelegate {
                 eprintln!("irec: {err}");
                 // 权限没生效是最常见的失败原因，单独给一条能照着做的提示。
                 let blocked = !unsafe { CGPreflightScreenCaptureAccess() };
-                log(&format!("start failed: {err} (permission blocked={blocked})"));
+                log(&format!(
+                    "start failed: {err} (permission blocked={blocked})"
+                ));
                 with_state(|s| {
                     s.last_error = Some(err);
                     s.permission_blocked = blocked;
@@ -1572,7 +1390,12 @@ impl AppDelegate {
 
     /// 截图：抓一帧存成 PNG，然后挂到晾衣绳上。
     fn screenshot(&self, region: Option<Rect>) {
+        self.screenshot_with_markup(region, None);
+    }
+
+    fn screenshot_with_markup(&self, region: Option<Rect>, markup: Option<bool>) {
         let settings = with_state(|s| s.settings.clone());
+        let markup = markup.unwrap_or(settings.markup);
         crate::shot::capture(
             region,
             settings.scale,
@@ -1580,7 +1403,6 @@ impl AppDelegate {
             true,
             move |result| match result {
                 Ok((path, bytes)) => {
-                    let markup = with_state(|s| s.settings.markup);
                     with_state(|s| {
                         s.last_saved = Some((path.clone(), bytes));
                         s.saved_at = Some(Instant::now());
@@ -1613,11 +1435,21 @@ impl AppDelegate {
 
     /// Mirrors the current state into the control window.
     fn update_window(&self) {
-        let (label, recording, stopping, audio, out_dir) = with_state(|s| {
+        let settings = with_state(|s| s.settings.clone());
+        for (id, button) in self.ivars().setting_checks.borrow().iter() {
+            button.setState(state_value(match id {
+                0 => settings.line,
+                1 => settings.line_hover,
+                2 => settings.markup,
+                _ => settings.update_check,
+            }));
+            if *id == 1 {
+                button.setEnabled(settings.line);
+            }
+        }
+        let (label, audio, out_dir) = with_state(|s| {
             (
                 window_status(s),
-                s.recorder.is_some(),
-                s.stopping,
                 s.settings.audio,
                 s.settings.out_dir.clone(),
             )
@@ -1638,33 +1470,28 @@ impl AppDelegate {
                 .unwrap_or(1);
             popup.selectItemAtIndex(index as isize);
         }
-        if let Some(button) = self.ivars().start_button.get() {
-            button.setTitle(&NSString::from_str(if stopping {
-                "正在保存…"
-            } else if recording {
-                "录制中…"
-            } else {
-                "开始录制（全屏）"
-            }));
-            button.setEnabled(!recording && !stopping);
-        }
-        if let Some(button) = self.ivars().region_button.get() {
-            button.setEnabled(!recording && !stopping);
-        }
-        // "停止录制" only does something while a recording is running.
-        if let Some(button) = self.ivars().stop_button.get() {
-            button.setEnabled(recording && !stopping);
-        }
     }
 
     fn refresh_status(&self) {
         let mtm = self.mtm();
-        let Some(item) = self.ivars().status_item.get() else { return };
-        let Some(button) = item.button(mtm) else { return };
+        let Some(item) = self.ivars().status_item.get() else {
+            return;
+        };
+        let Some(button) = item.button(mtm) else {
+            return;
+        };
 
-        let (title, recording) = with_state(|s| (status_title(s), s.recorder.is_some()));
+        let title = with_state(|s| status_title(s));
         button.setTitle(&NSString::from_str(&title));
-        button.setImage(Some(&status_icon(mtm, recording)));
+        if let Some(logo) = self.ivars().status_logo.get() {
+            button.setImage(Some(logo));
+        }
+        button.setToolTip(Some(ns_string!("iRec · 截图与录屏")));
+        if let Some(window) = button.window() {
+            line::set_anchor(
+                window.convertRectToScreen(button.convertRect_toView(button.bounds(), None)),
+            );
+        }
     }
 
     fn refresh_menu(&self) {
@@ -1672,9 +1499,6 @@ impl AppDelegate {
         let (recording, stopping) = with_state(|s| (s.recorder.is_some(), s.stopping));
         let scroll_status = with_state(|s| s.scroll_shot_status.clone());
         let scrolling = scrollshot::is_active();
-        if let Some(item) = self.ivars().stop_menu_item.get() {
-            item.setEnabled(recording && !stopping);
-        }
         if let Some(item) = self.ivars().scroll_shot_item.get() {
             item.setHidden(scrolling);
             item.setEnabled(!recording && !stopping && !scrolling && scroll_status.is_none());
@@ -1691,31 +1515,7 @@ impl AppDelegate {
             item.setHidden(!scrolling);
             item.setEnabled(scrolling);
         }
-        for (index, item) in self.ivars().audio_items.borrow().iter() {
-            let matches = AudioSource::all()[*index] == settings.audio;
-            item.setState(state_value(matches));
-        }
-        if let Some(item) = self.ivars().out_dir_item.get() {
-            item.setTitle(&NSString::from_str(&format!(
-                "保存位置：{}",
-                short_path(&settings.out_dir)
-            )));
-        }
-        for (index, item) in self.ivars().quality_items.borrow().iter() {
-            let matches = Quality::all()[*index] == settings.quality;
-            item.setState(state_value(matches));
-        }
-        for (fps, item) in self.ivars().fps_items.borrow().iter() {
-            item.setState(state_value(*fps == settings.fps));
-        }
-        for (scale, item) in self.ivars().scale_items.borrow().iter() {
-            item.setState(state_value((*scale as f64 / 10.0 - settings.scale).abs() < 0.01));
-        }
-        if let Some(item) = self.ivars().last_file.get() {
-            let has_file = with_state(|s| s.last_saved.is_some());
-            item.setHidden(!has_file);
-        }
-        let (enabled, hover, revealed) = line::status();
+        let (enabled, _, revealed) = line::status();
         if let Some(item) = self.ivars().line_toggle_item.get() {
             item.setTitle(&NSString::from_str(if revealed {
                 "收起晾衣绳"
@@ -1724,24 +1524,13 @@ impl AppDelegate {
             }));
             item.setEnabled(enabled);
         }
-        if let Some(item) = self.ivars().line_hover_item.get() {
-            item.setState(state_value(hover));
-            item.setEnabled(enabled);
-        }
-        if let Some(item) = self.ivars().line_enable_item.get() {
-            item.setState(state_value(enabled));
-        }
-        if let Some(item) = self.ivars().markup_item.get() {
-            item.setState(state_value(with_state(|s| s.settings.markup)));
-        }
-        if let Some(item) = self.ivars().annotate_item.get() {
-            item.setEnabled(self.latest_shot().is_some());
-        }
         if let Some(item) = self.ivars().update_item.get() {
             let view = with_state(|s| {
                 s.update.as_ref().map(|u| {
                     let title = if u.busy {
-                        u.message.clone().unwrap_or_else(|| "正在检查更新…".to_string())
+                        u.message
+                            .clone()
+                            .unwrap_or_else(|| "正在检查更新…".to_string())
                     } else if let Some(tag) = &u.tag {
                         format!("↑ 发现新版本 {tag}，点此更新")
                     } else {
@@ -1754,26 +1543,71 @@ impl AppDelegate {
             match view {
                 Some((title, actionable)) => {
                     item.setTitle(&NSString::from_str(&title));
-                    item.setHidden(false);
+                    item.setHidden(!actionable);
                     item.setEnabled(actionable);
                 }
                 None => item.setHidden(true),
             }
         }
-        if let Some(item) = self.ivars().update_check_item.get() {
-            item.setState(state_value(with_state(|s| s.settings.update_check)));
-        }
-        let hotkeys = with_state(|s| s.settings.hotkeys);
+        let hotkeys = settings.hotkeys;
+        let elapsed = with_state(|s| {
+            s.started_at
+                .map(|t| {
+                    let secs = t.elapsed().as_secs();
+                    format!("{:02}:{:02}", secs / 60, secs % 60)
+                })
+                .unwrap_or_default()
+        });
+        let start_title = if stopping {
+            "正在保存…".to_string()
+        } else if recording {
+            format!("停止录制 · {elapsed}")
+        } else {
+            "录制全屏".to_string()
+        };
         let named = [
-            (self.ivars().start_menu_item.get(), "开始录制（全屏）", hotkeys.record_full),
-            (self.ivars().region_menu_item.get(), "选择区域录制", hotkeys.record_region),
-            (self.ivars().shot_full_item.get(), "截取全屏", hotkeys.shot_full),
-            (self.ivars().shot_region_item.get(), "截取选区", hotkeys.shot_region),
+            (
+                self.ivars().start_menu_item.get(),
+                start_title.as_str(),
+                hotkeys.record_full,
+            ),
+            (
+                self.ivars().region_menu_item.get(),
+                "录制区域…",
+                hotkeys.record_region,
+            ),
+            (
+                self.ivars().shot_full_item.get(),
+                "截取全屏",
+                hotkeys.shot_full,
+            ),
+            (
+                self.ivars().shot_region_item.get(),
+                "截取区域…",
+                hotkeys.shot_region,
+            ),
         ];
         for (item, name, key) in named {
             if let Some(item) = item {
-                item.setTitle(&NSString::from_str(&format!("{name}   {}", key.display())));
+                item.setTitle(&NSString::from_str(name));
+                key.apply_to_menu(item);
             }
+        }
+        if let Some(item) = self.ivars().start_menu_item.get() {
+            item.setEnabled(!stopping && !scrolling && scroll_status.is_none());
+        }
+        if let Some(item) = self.ivars().region_menu_item.get() {
+            item.setHidden(recording || stopping);
+            item.setEnabled(!scrolling && scroll_status.is_none());
+        }
+        for item in [
+            self.ivars().shot_full_item.get(),
+            self.ivars().shot_region_item.get(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            item.setEnabled(!recording && !stopping && !scrolling && scroll_status.is_none());
         }
         if let Some(item) = self.ivars().status_line.get() {
             let blocked = with_state(|s| s.permission_blocked);
@@ -1795,12 +1629,6 @@ impl AppDelegate {
                     Some(status.clone())
                 } else if let Some(err) = &s.last_error {
                     Some(format!("⚠ {err}"))
-                } else if let Some((path, bytes)) = &s.last_saved {
-                    Some(format!(
-                        "已保存 {}（{:.1} MB）",
-                        path.file_name().unwrap_or_default().to_string_lossy(),
-                        *bytes as f64 / 1_048_576.0
-                    ))
                 } else {
                     None
                 }
@@ -1886,24 +1714,45 @@ impl CaptureView {
     }
 }
 
-/// Draws the menu bar icon: a filled red dot while recording, a ring when idle.
-fn status_icon(mtm: MainThreadMarker, recording: bool) -> Retained<NSImage> {
-    let size = NSSize::new(18.0, 18.0);
-    let image = NSImage::initWithSize(NSImage::alloc(), size);
-    image.lockFocus();
-    unsafe {
-        let rect = NSRect::new(NSPoint::new(3.0, 3.0), NSSize::new(12.0, 12.0));
-        let dot = NSBezierPath::bezierPathWithOvalInRect(rect);
-        if recording {
-            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 0.25, 0.25, 1.0).setFill();
-            dot.fill();
-        } else {
-            NSColor::colorWithSRGBRed_green_blue_alpha(0.55, 0.55, 0.58, 1.0).setStroke();
-            dot.setLineWidth(1.5);
-            dot.stroke();
+/// A monochrome rendition of the product's screen, capture brackets and record dot.
+/// AppKit tints the template to match light, dark and highlighted menu bars.
+fn status_icon() -> Retained<NSImage> {
+    let drawing = RcBlock::new(|_: NSRect| -> objc2::runtime::Bool {
+        let screen = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+            NSRect::new(NSPoint::new(2.0, 4.0), NSSize::new(16.0, 12.0)),
+            2.0,
+            2.0,
+        );
+        NSColor::blackColor()
+            .colorWithAlphaComponent(0.35)
+            .setStroke();
+        screen.setLineWidth(0.8);
+        screen.stroke();
+
+        NSColor::blackColor().setStroke();
+        let brackets = NSBezierPath::bezierPath();
+        brackets.setLineWidth(1.5);
+        brackets.setLineCapStyle(objc2_app_kit::NSLineCapStyle::Round);
+        brackets.setLineJoinStyle(objc2_app_kit::NSLineJoinStyle::Round);
+        for (x, sx) in [(3.5, 1.0), (16.5, -1.0)] {
+            for (y, sy) in [(5.5, 1.0), (14.5, -1.0)] {
+                brackets.moveToPoint(NSPoint::new(x, y + sy * 2.0));
+                brackets.lineToPoint(NSPoint::new(x, y));
+                brackets.lineToPoint(NSPoint::new(x + sx * 2.5, y));
+            }
         }
-    }
-    image.unlockFocus();
+        brackets.stroke();
+        NSColor::blackColor().setFill();
+        NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(7.9, 7.9),
+            NSSize::new(4.2, 4.2),
+        ))
+        .fill();
+        objc2::runtime::Bool::YES
+    });
+    let image =
+        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(20.0, 20.0), false, &drawing);
+    image.setTemplate(true);
     image
 }
 
@@ -1915,8 +1764,8 @@ fn request_mic_access() {
     let Some(media_type) = media_type else { return };
     let block: RcBlock<dyn Fn(objc2::runtime::Bool)> =
         RcBlock::new(|granted: objc2::runtime::Bool| {
-        log(&format!("microphone access granted={}", granted.as_bool()));
-    });
+            log(&format!("microphone access granted={}", granted.as_bool()));
+        });
     unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &block) };
 }
 
@@ -1932,7 +1781,12 @@ fn short_path(path: &Path) -> String {
     text
 }
 
-fn make_label(mtm: MainThreadMarker, text: &str, frame: NSRect, size: f64) -> Retained<NSTextField> {
+fn make_label(
+    mtm: MainThreadMarker,
+    text: &str,
+    frame: NSRect,
+    size: f64,
+) -> Retained<NSTextField> {
     let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), frame);
     field.setStringValue(&NSString::from_str(text));
     field.setBezeled(false);
@@ -1990,6 +1844,10 @@ fn make_popup(
 fn build_main_menu(mtm: MainThreadMarker, target: &AppDelegate) -> Retained<NSMenu> {
     let main = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("MainMenu"));
     let app_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("iRec"));
+    let settings = menu_item(mtm, "设置…", Some(sel!(showWindow:)), target, 0);
+    settings.setKeyEquivalent(ns_string!(","));
+    app_menu.addItem(&settings);
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     let quit = menu_item(mtm, "退出 iRec", Some(sel!(quit:)), target, 0);
     quit.setKeyEquivalent(ns_string!("q"));
     quit.setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags::Command);
@@ -2005,6 +1863,19 @@ fn build_main_menu(mtm: MainThreadMarker, target: &AppDelegate) -> Retained<NSMe
     };
     app_item.setSubmenu(Some(&app_menu));
     main.addItem(&app_item);
+    // The same capture menu is reachable while a utility window has focus.
+    let capture = NSMenu::new(mtm);
+    let capture_root = menu_item(mtm, "捕获", None, target, 0);
+    for (label, action) in [
+        ("截取区域…", sel!(shotRegion:)),
+        ("截取全屏", sel!(shotFull:)),
+        ("录制全屏 / 停止", sel!(startFull:)),
+        ("显示晾衣绳", sel!(toggleLine:)),
+    ] {
+        capture.addItem(&menu_item(mtm, label, Some(action), target, 0));
+    }
+    capture_root.setSubmenu(Some(&capture));
+    main.addItem(&capture_root);
     std::mem::forget(app_menu);
     std::mem::forget(app_item);
     main
@@ -2050,6 +1921,9 @@ pub(crate) fn relaunch_app(mtm: MainThreadMarker) {
 }
 
 fn window_status(state: &AppState) -> String {
+    if let Some(message) = state.update.as_ref().and_then(|u| u.message.as_ref()) {
+        return message.clone();
+    }
     if let Some(started) = state.started_at {
         let secs = started.elapsed().as_secs();
         return format!("● 录制中 {:02}:{:02}", secs / 60, secs % 60);
@@ -2109,7 +1983,7 @@ fn status_title(state: &AppState) -> String {
         }
         return format!("⚠ {err}");
     }
-    "REC".to_string()
+    String::new()
 }
 
 fn menu_item(
@@ -2162,7 +2036,6 @@ fn main() {
     // Menu-bar app: no Dock icon and no window on launch. Everything is
     // reachable from the status item menu (plus the two global hotkeys).
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-
 
     let delegate = AppDelegate::new(mtm);
     unsafe { app.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };

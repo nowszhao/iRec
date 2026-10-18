@@ -113,11 +113,10 @@ Check any build yourself:
 | `⇧⌘A` | Screenshot the selected region (pick one first if needed) |
 | `⌘Q` | Quit, after finalising the file in progress |
 
-Click the menu bar item for recording, audio, quality, save location, the line and
-permission checks. "Open control window…" brings up the same controls in a window; closing
-it only hides it.
+Click the status item to capture, record, or reveal the clothesline. **Settings…** (`⌘,`)
+contains quality, sound, save location, shortcuts, permissions and update preferences.
 
-Open **Hotkeys…** from the menu (or the control window) to rebind any of them: press the
+Open **Hotkeys…** in Settings to rebind any of them: press the
 new combination, `⌫` clears one and `Esc` cancels. A shortcut needs `⌘`, `⌥` or `⌃`, and
 one combination is kept for a single action only.
 
@@ -141,9 +140,15 @@ Cancel buttons in the preview panel.
 
 ## Screenshots and annotation
 
+Selections retain their original brightness. After dragging, press Return or click the
+confirmation button; Esc cancels. **Capture and annotate** opens the editor for that
+capture without changing your preference. Single-click a card for an image or video
+preview; long images scroll vertically. New installations do not open annotation
+automatically; existing preferences are preserved. Rounded corners and shadows belong
+to the preview only, leaving exported PNG pixels intact.
+
 Screenshots are saved as `iRec-shot-YYYYMMDD-HHMMSS.png` and hung on the line. Annotate
-straight after capturing, or via "Annotate latest screenshot…" in the menu / the Annotate
-button on an image card.
+using **Capture and annotate**, the pencil on an image card, or **Annotate** in its preview.
 
 | Control | Behaviour |
 | --- | --- |
@@ -163,16 +168,20 @@ ships its own editor.
 Finished recordings and screenshots hang from a rope under the menu bar, pegged with a
 play button on the first frame.
 
-The line rests above the screen edge: rest the pointer in the menu bar for 0.25 s and it
-slides down, move away and it tucks back after 0.5 s. It also shows itself for 2.5 s after
-a capture and stays hidden while one is running.
+The compact rope follows the number of captures. Hover near the iRec status icon for
+0.25 s to reveal it; it retracts 0.5 s after leaving. New captures appear for 2.5 s.
+The line stays open during previews and dragging, and hides while recording. Cards hang from staggered wires along a curved rope. Pointer movement gently swings
+them, idle cards stay still, and Reduce Motion is respected.
 
 | Gesture | Result |
 | --- | --- |
-| Click / double-click a card | Reveal in Finder / open in the default player |
+| Click / double-click a card | Native preview / open in the default app |
 | Drag into an app or a folder | The destination gets the file, the card stays |
 | Drag onto the Dock's Trash | File to the Trash, card leaves the line |
-| Click the cross (⌥ + click) | Take it off the line (⌥ also trashes the file) |
+| Click the cross | Remove the card, keeping the file |
+| Right-click / More in the preview | Open, reveal in Finder, remove, or move to Trash |
+| After revealing from the menu: arrows, Space / Return | Select a card, open its preview (Esc retracts) |
+| Preview: `⌘C` / `⌘E` / `Esc` | Copy / annotate an image / close (Space plays or pauses video) |
 
 A card only leaves the line when you take it off or clear the line — dragging it somewhere
 or deleting the file elsewhere keeps it hanging. At most eight hang at once.
@@ -181,6 +190,10 @@ The animation idea comes from [Tendedero](https://github.com/alejandrobujan/tend
 (MIT), reimplemented with hand-drawn AppKit and its own spring integration in `src/line.rs`.
 
 ## Settings and auto-update
+
+The status menu keeps capture actions at one level and shows Stop with elapsed time
+while recording. **Settings…** (`⌘,`) contains capture quality, sound, save location,
+shortcuts, clothesline preferences, permissions and updates. Reopening iRec shows settings.
 
 Settings (save location, audio source, quality, frame rate, resolution, line behaviour) are
 persisted in `NSUserDefaults`. The default save location is `~/Desktop`; recordings are
@@ -197,7 +210,7 @@ need to be granted again.
 
 On first launch iRec opens a permission guide. macOS does not allow an app to flip its own
 TCC switches, so the guide triggers the system prompts, opens the exact Screen Recording and
-Accessibility panes, and watches both states live. Use **Permission Settings…** in the menu to
+Accessibility panes, and watches both states live. Use **Permission Settings…** in Settings to
 reopen it; once both rows are green, choose **Relaunch iRec**.
 
 If recording still fails, the manual route is:

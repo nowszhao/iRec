@@ -86,18 +86,18 @@ define_class!(
             let accent = if recording {
                 NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 0.30, 0.26, 1.0)
             } else {
-                NSColor::colorWithSRGBRed_green_blue_alpha(0.28, 0.84, 0.96, 1.0)
+                NSColor::controlAccentColor()
             };
             let inner = NSBezierPath::bezierPathWithRect(NSRect::new(
                 NSPoint::new(bounds.origin.x + 1.5, bounds.origin.y + 1.5),
                 NSSize::new(bounds.size.width - 3.0, bounds.size.height - 3.0),
             ));
-            inner.setLineWidth(2.0);
+            inner.setLineWidth(1.0);
             accent.setStroke();
             inner.stroke();
 
             let tick = NSBezierPath::bezierPath();
-            tick.setLineWidth(4.0);
+            tick.setLineWidth(2.0);
             let x0 = bounds.origin.x + 1.5;
             let y0 = bounds.origin.y + 1.5;
             let x1 = x0 + bounds.size.width - 3.0;
@@ -164,10 +164,10 @@ define_class!(
                 9.0,
                 9.0,
             );
-            NSColor::colorWithSRGBRed_green_blue_alpha(0.07, 0.10, 0.13, 0.94).setFill();
+            NSColor::windowBackgroundColor().setFill();
             pill.fill();
             pill.setLineWidth(1.0);
-            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.18).setStroke();
+            NSColor::separatorColor().setStroke();
             pill.stroke();
         }
     }
@@ -216,10 +216,10 @@ define_class!(
                 NSPoint::new(bounds.origin.x + 2.0, bounds.origin.y + 2.0),
                 NSSize::new(bounds.size.width - 4.0, bounds.size.height - 4.0),
             ));
-            NSColor::colorWithSRGBRed_green_blue_alpha(0.07, 0.10, 0.13, 0.92).setFill();
+            NSColor::windowBackgroundColor().setFill();
             dot.fill();
             dot.setLineWidth(2.0);
-            NSColor::colorWithSRGBRed_green_blue_alpha(0.28, 0.84, 0.96, 1.0).setStroke();
+            NSColor::controlAccentColor().setStroke();
             dot.stroke();
         }
     }
@@ -347,7 +347,7 @@ fn make_label(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSTextField> {
     field.setDrawsBackground(false);
     field.setEditable(false);
     field.setSelectable(false);
-    field.setTextColor(Some(&NSColor::whiteColor()));
+    field.setTextColor(Some(&NSColor::labelColor()));
     field.setFont(Some(&NSFont::systemFontOfSize(12.0)));
     field
 }
@@ -399,7 +399,7 @@ fn build(mtm: MainThreadMarker, rect: Rect) -> Hud {
     // 同一个选区框，既能录也能截。
     let bar_shot = make_button(
         mtm,
-        "截屏",
+        "截图",
         NSRect::new(NSPoint::new(148.0, 6.0), NSSize::new(64.0, 22.0)),
         sel!(hudShot:),
     );
@@ -486,10 +486,8 @@ fn layout(hud: &mut Hud) {
         NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.w, r.h)),
         true,
     );
-    hud.frame_view.setFrame(NSRect::new(
-        NSPoint::new(0.0, 0.0),
-        NSSize::new(r.w, r.h),
-    ));
+    hud.frame_view
+        .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(r.w, r.h)));
 
     let bx = clamp_value(
         r.x,
@@ -498,7 +496,11 @@ fn layout(hud: &mut Hud) {
     );
     let above = r.y + r.h + 8.0;
     let by = if above + BAR_H > s.origin.y + s.size.height {
-        (r.y + r.h - BAR_H - 8.0).max(s.origin.y + 4.0)
+        if r.y - BAR_H - 8.0 >= s.origin.y + 4.0 {
+            r.y - BAR_H - 8.0
+        } else {
+            (r.y + r.h - BAR_H - 8.0).max(s.origin.y + 4.0)
+        }
     } else {
         above
     };

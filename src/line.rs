@@ -1,14 +1,9 @@
 //! 晾衣绳：录完的视频挂在菜单栏下面的一根绳子上。
 //!
 //! 动画的创意来自 Tendedero（<https://github.com/alejandrobujan/tendedero>），
-//! 全部用 AppKit 手绘 + 弹簧积分复刻：
-//!
-//! * 绳子是一条两端淡出的抛物线，卡片用夹子夹在上面；
-//! * 每张卡片带一点随机倾角，落绳时先甩一下再慢慢停住（阻尼弹簧）；
-//! * 隔一阵来一阵风，整排卡片随机先后、随机幅度地轻轻晃；
-//! * 新录完的视频从录制的那块区域「飞」上来，边飞边长出玻璃边框和夹子；
-//! * 取下时卡片一边转一边往下掉；
-//! * 绳子默认收在屏幕上方，指针在菜单栏停留 0.25 秒才滑下来，离开 0.5 秒自己收回。
+//! 使用紧凑绳子、原比例缩略图和一次性入场动画。
+//! 单击原生预览，双击默认应用打开，拖拽交付文件，右键管理。
+//! 只在 iRec 状态图标附近悬停时展开；遵循系统减少动态效果设置。
 //!
 //! 所有坐标在模块内部统一成「顶空间」：原点在绳子窗口左上角，y 向下；
 //! 画的时候再翻成 AppKit 的视图坐标（y 向上）。
@@ -22,14 +17,15 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
+    NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityElement, NSAccessibilityGroupRole,
     NSBackingStoreType, NSBezierPath, NSColor, NSCursor, NSDragOperation, NSDraggingContext,
-    NSDraggingItem, NSDraggingSession, NSDraggingSource, NSEvent, NSEventModifierFlags,
-    NSFloatingWindowLevel, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSGradient,
-    NSGraphicsContext, NSImage, NSPanel, NSPasteboardWriting, NSScreen, NSShadow, NSStringDrawing,
-    NSView, NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
+    NSDraggingItem, NSDraggingSession, NSDraggingSource, NSEvent, NSFloatingWindowLevel, NSFont,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSImage, NSMenu,
+    NSMenuItem, NSPanel, NSPasteboardWriting, NSScreen, NSShadow, NSStringDrawing, NSView,
+    NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVAssetImageGenerator, AVURLAsset};
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::CGSize;
 use objc2_core_graphics::CGContext;
 use objc2_core_graphics::CGImage;
 use objc2_core_media::CMTime;
@@ -44,19 +40,18 @@ use crate::state::Rect;
 
 /// 照片区最大高度；卡片宽度；两张卡片中心之间的距离。
 const PHOTO_MAX_H: f64 = 104.0;
-const CARD_W: f64 = 150.0;
-const SPACING: f64 = CARD_W + 24.0;
+const CARD_W: f64 = 168.0;
+const SPACING: f64 = CARD_W + 30.0;
 /// 绳子窗口高度：照片 + 夹子 + 上下留白。
-const PANEL_H: f64 = PHOTO_MAX_H + 106.0;
+const PANEL_H: f64 = 320.0;
 /// 绳子两端离窗口顶部的距离。
 const ROPE_TOP: f64 = 10.0;
 /// 夹子顶边在绳子上方多少。
-const PIN_ABOVE: f64 = 9.5;
-/// 照片外面那圈玻璃的厚度。
-const INSET: f64 = 4.0;
-const RADIUS: f64 = 16.0;
-/// 夹子高 26，其中 12 压在卡片上，所以卡片顶边在夹子顶边下方 14。
-const CARD_TOP: f64 = 14.0;
+/// 缩略图与卡片之间的留白。
+const INSET: f64 = 3.0;
+const RADIUS: f64 = 12.0;
+/// 卡片顶边与夹子之间的距离。
+const CARD_TOP: f64 = 8.0;
 /// 绳上最多挂几张，多了最旧那张自己掉下去。
 const MAX_ITEMS: usize = 8;
 /// 收起时整条绳子往上藏多少。
@@ -64,11 +59,11 @@ const HIDDEN: f64 = PANEL_H + 12.0;
 
 // MARK: - 动画时长
 
-const FLIGHT_DUR: f64 = 0.65;
-const FALL_DUR: f64 = 0.55;
-const FALL_DISTANCE: f64 = 520.0;
+const FLIGHT_DUR: f64 = 0.36;
+const FALL_DUR: f64 = 0.20;
+const FALL_DISTANCE: f64 = 16.0;
 /// 飞行途中往上拱起的高度。
-const ARC: f64 = 30.0;
+const ARC: f64 = 12.0;
 /// 指针在菜单栏停留多久把绳子放下来。
 const REVEAL_DELAY: f64 = 0.25;
 /// 指针离开多久把绳子收回去。
@@ -108,8 +103,8 @@ impl Spring {
 
 /// 卡片落绳（从上方 46 点落下）。
 const ARRIVE: Spring = Spring::response(0.42, 0.72);
-/// 摆动：欠阻尼得很厉害，所以会来回晃很久。
-const SWING: Spring = Spring::stiffness(46.0, 2.6);
+/// 单次轻摆，快速停稳。
+const SWING: Spring = Spring::stiffness(55.0, 10.0);
 /// 卡片在绳上的横向挪动。
 const LAYOUT: Spring = Spring::response(0.55, 0.78);
 /// 绳子滑下来 / 收回去。
@@ -123,17 +118,27 @@ fn nudge(swing_v: &mut f64, degrees: f64) {
 
 // MARK: - 绳子的形状
 
-fn sag(width: f64) -> f64 {
-    (width * 0.018).min(30.0)
+/// Curvature is relative to the visible rope, never the full display width.
+fn rope_span(width: f64, count: usize) -> (f64, f64) {
+    let length = (count.max(1) as f64 * SPACING + 104.0)
+        .max(420.0)
+        .min((width - 32.0).max(1.0));
+    ((width - length) / 2.0, length)
 }
 
-/// 绳子在 x 处的高度（顶空间）。
-fn rope_y(x: f64, width: f64) -> f64 {
-    if width <= 0.0 {
-        return ROPE_TOP;
-    }
-    let f = x / width;
-    ROPE_TOP + 4.0 * sag(width) * f * (1.0 - f)
+fn sag(length: f64) -> f64 {
+    (length * 0.085).clamp(28.0, 64.0)
+}
+
+fn rope_y(x: f64, width: f64, count: usize) -> f64 {
+    let (left, length) = rope_span(width, count);
+    let f = ((x - left) / length).clamp(0.0, 1.0);
+    ROPE_TOP + 4.0 * sag(length) * f * (1.0 - f)
+}
+
+fn hanging_style(id: u64) -> (f64, f64) {
+    let i = id.saturating_sub(1) as usize % 4;
+    ([24.0, 42.0, 30.0, 46.0][i], [-1.8, 1.4, -1.0, 2.0][i])
 }
 
 /// 第 index 张卡片挂在哪儿：居中排开，太挤就互相靠近。
@@ -160,11 +165,11 @@ struct Peg {
     id: u64,
     path: PathBuf,
     image: Retained<NSImage>,
-    /// 照片区大小（不含玻璃边）。
-    photo: NSSize,
     /// 录屏（画播放键）还是截图。
     video: bool,
-    /// 静止时的倾角，随机 ±2.5°，看着像手夹上去的。
+    duration: Option<String>,
+    /// Short suspension wires give captures a staggered, hanging rhythm.
+    hanger: f64,
     tilt: f64,
     swing: f64,
     swing_v: f64,
@@ -180,19 +185,21 @@ struct Peg {
     fall: Option<f64>,
     hover: bool,
     hover_mix: f64,
-    /// 一阵风吹过来的时间和幅度。
-    gust: Option<(Instant, f64)>,
     /// 操作反馈（「已显示」之类）和它出现的时刻。
     bubble: Option<(String, Instant)>,
 }
 
 impl Peg {
+    fn top_offset(&self) -> f64 {
+        self.hanger + CARD_TOP
+    }
+
     fn card_w(&self) -> f64 {
-        self.photo.width + INSET * 2.0
+        CARD_W
     }
 
     fn card_h(&self) -> f64 {
-        self.photo.height + INSET * 2.0
+        PHOTO_MAX_H + INSET * 2.0 + 24.0
     }
 }
 
@@ -227,10 +234,10 @@ struct LineState {
     width: f64,
     height: f64,
     last: Instant,
-    breeze_at: Instant,
     enabled: bool,
     hover_enabled: bool,
     busy: bool,
+    reduced_motion: bool,
     pointer: Option<NSPoint>,
     next_id: u64,
     /// 绳子所在的屏幕（AppKit 全局坐标）。
@@ -247,6 +254,11 @@ struct LineState {
     hand: bool,
     /// 窗口现在是否接收点击（只有指针压在卡片上时才收，其余时候点击穿过去）。
     clickable: bool,
+    tooltip: Option<(u64, Hit)>,
+    anchor: Option<NSRect>,
+    pending_click: Option<(u64, Instant)>,
+    context_id: Option<u64>,
+    focused: Option<u64>,
 }
 
 impl Default for LineState {
@@ -265,10 +277,10 @@ impl Default for LineState {
             width: 0.0,
             height: PANEL_H,
             last: Instant::now(),
-            breeze_at: Instant::now() + Duration::from_secs(6),
             enabled: true,
             hover_enabled: true,
             busy: false,
+            reduced_motion: false,
             pointer: None,
             next_id: 1,
             screen: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
@@ -278,6 +290,11 @@ impl Default for LineState {
             dragging: None,
             hand: false,
             clickable: false,
+            tooltip: None,
+            anchor: None,
+            pending_click: None,
+            context_id: None,
+            focused: None,
         }
     }
 }
@@ -302,6 +319,7 @@ struct Pending {
     region: Option<Rect>,
     /// 录屏（有播放键）还是截图（没有）。
     video: bool,
+    duration: Option<String>,
 }
 
 static PENDING: Mutex<Vec<Pending>> = Mutex::new(Vec::new());
@@ -317,16 +335,16 @@ struct Line {
 unsafe impl Send for Line {}
 
 define_class!(
-    /// 绳子窗口：永远不抢焦点，也不接收键盘。
+    /// 悬停不抢焦点；主动展开时支持键盘。
     #[unsafe(super = NSPanel)]
     #[thread_kind = MainThreadOnly]
     #[ivars = PanelIvars]
     struct LinePanel;
 
     impl LinePanel {
-        #[unsafe(method(canBecomeKey))]
+        #[unsafe(method(canBecomeKeyWindow))]
         fn can_become_key(&self) -> bool {
-            false
+            true
         }
 
         #[unsafe(method(canBecomeMainWindow))]
@@ -419,6 +437,7 @@ define_class!(
             let index = self.ivars().state.borrow().items.iter().position(|i| i.id == id);
             if let Some(index) = index {
                 self.ivars().state.borrow_mut().press = None;
+                self.ivars().state.borrow_mut().pending_click = None;
                 self.start_drag(index, event);
             }
         }
@@ -429,23 +448,108 @@ define_class!(
             let Some((id, on, _)) = press else { return };
             let index = self.ivars().state.borrow().items.iter().position(|i| i.id == id);
             let Some(index) = index else { return };
-            let option = event.modifierFlags().contains(NSEventModifierFlags::Option);
             match on {
-                Hit::Close => self.take_off(index, option),
+                Hit::Close => { self.take_off(index, false); },
                 Hit::Annotate => self.annotate(index),
                 Hit::Card => {
                     if event.clickCount() >= 2 {
+                        self.ivars().state.borrow_mut().pending_click = None;
+                        crate::preview::close();
                         self.open(index);
                     } else {
-                        self.reveal_in_finder(index);
+                        self.ivars().state.borrow_mut().pending_click = Some((id, Instant::now()));
                     }
                 }
+            }
+        }
+
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool { true }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            let mut st = self.ivars().state.borrow_mut();
+            let live: Vec<u64> = st.items.iter().filter(|p| p.fall.is_none()).map(|p| p.id).collect();
+            if event.keyCode() == 53 { st.pinned = false; st.revealed = false; return; }
+            if live.is_empty() { return; }
+            let current = live.iter().position(|id| Some(*id) == st.focused).unwrap_or(live.len() - 1);
+            match event.keyCode() {
+                123 => st.focused = Some(live[current.saturating_sub(1)]),
+                124 => st.focused = Some(live[(current + 1).min(live.len() - 1)]),
+                36 | 49 | 76 => {
+                    let index = st.items.iter().position(|p| p.id == live[current]);
+                    drop(st);
+                    if let Some(index) = index { self.preview(index); }
+                },
+                _ => {},
+            }
+            self.setNeedsDisplay(true);
+        }
+
+        #[unsafe(method_id(accessibilityChildren))]
+        fn accessibility_children(&self) -> Retained<NSArray<AnyObject>> {
+            let st = self.ivars().state.borrow();
+            let mut children: Vec<Retained<AnyObject>> = Vec::new();
+            for item in st.items.iter().filter(|p| st.slide >= 0.6 && !p.flying && p.fall.is_none()) {
+                let child = CaptureAccessibility::alloc(self.mtm()).set_ivars(item.id);
+                let child: Retained<CaptureAccessibility> = unsafe { msg_send![super(child), init] };
+                let label = format!("{}，{}，按下以预览", if item.video { "录屏" } else { "截图" }, item.path.file_name().unwrap_or_default().to_string_lossy());
+                unsafe { child.setAccessibilityRole(Some(NSAccessibilityButtonRole)); }
+                child.setAccessibilityLabel(Some(&NSString::from_str(&label)));
+                let rect = flip(st.height, item.x - item.card_w() / 2.0, rope_y(item.x, st.width, st.items.len()) + item.top_offset(), item.card_w(), item.card_h());
+                if let Some(panel) = panel_target() { child.setAccessibilityFrame(panel.convertRectToScreen(rect)); }
+                unsafe { child.setAccessibilityParent(Some(self)); }
+                children.push(Retained::into_super(Retained::into_super(child)).into());
+            }
+            NSArray::from_retained_slice(&children)
+        }
+
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            let point = self.convertPoint_fromView(event.locationInWindow(), None);
+            let Some((index, _)) = self.hit(point) else { return };
+            let id = self.ivars().state.borrow().items[index].id;
+            self.ivars().state.borrow_mut().context_id = Some(id);
+            let menu = NSMenu::new(self.mtm());
+            for (label, tag) in [("预览", 0), ("用默认应用打开", 1), ("在访达中显示", 2), ("从晾衣绳移除", 3), ("移到废纸篓", 4)] {
+                if tag == 3 { menu.addItem(&NSMenuItem::separatorItem(self.mtm())); }
+                let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(self.mtm()), &NSString::from_str(label), Some(sel!(cardAction:)), &NSString::new()) };
+                item.setTag(tag);
+                unsafe { item.setTarget(Some(self)); }
+                menu.addItem(&item);
+            }
+            NSMenu::popUpContextMenu_withEvent_forView(&menu, event, self);
+            self.ivars().state.borrow_mut().context_id = None;
+        }
+
+        #[unsafe(method(cardAction:))]
+        fn card_action(&self, sender: &NSMenuItem) {
+            let index = { let st = self.ivars().state.borrow(); st.items.iter().position(|p| Some(p.id) == st.context_id) };
+            if let Some(index) = index {
+                match sender.tag() { 0 => self.preview(index), 1 => self.open(index), 2 => self.reveal_in_finder(index), 3 => { self.take_off(index, false); }, 4 => { self.take_off(index, true); }, _ => {} }
             }
         }
 
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &AnyObject) {
             self.step();
+        }
+    }
+);
+
+define_class!(
+    #[unsafe(super = NSAccessibilityElement)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = u64]
+    struct CaptureAccessibility;
+
+    impl CaptureAccessibility {
+        #[unsafe(method(accessibilityPerformPress))]
+        fn press(&self) -> bool {
+            if let Some(view) = line_view() {
+                let index = view.ivars().state.borrow().items.iter().position(|p| p.id == *self.ivars());
+                if let Some(index) = index { view.preview(index); true } else { false }
+            } else { false }
         }
     }
 );
@@ -492,14 +596,19 @@ impl LineView {
             if item.flying || item.fall.is_some() {
                 continue;
             }
-            let ay = rope_y(item.x, st.width) - PIN_ABOVE + item.drop;
+            let ay = rope_y(item.x, st.width, st.items.len()) + item.drop;
             // 卡片是绕夹子顶边转的，先把指针转回去再判矩形。
             let (dx, dy2) = (px - item.x, py - ay);
-            let a = (item.swing + item.tilt).to_radians();
+            let a = (if st.reduced_motion {
+                0.0
+            } else {
+                item.swing + item.tilt
+            })
+            .to_radians();
             let (cos, sin) = (a.cos(), a.sin());
             let (lx, ly) = (dx * cos + dy2 * sin + item.x, -dx * sin + dy2 * cos + ay);
             let left = item.x - item.card_w() / 2.0;
-            let top = ay + CARD_TOP;
+            let top = ay + item.top_offset();
             let inside =
                 lx >= left && lx <= left + item.card_w() && ly >= top && ly <= top + item.card_h();
             if !inside {
@@ -540,38 +649,48 @@ impl LineView {
         st.height = self.bounds().size.height;
         drop(st);
 
+        let click = {
+            let mut st = self.ivars().state.borrow_mut();
+            if st.pending_click.is_some_and(|(_, at)| {
+                now.duration_since(at).as_secs_f64() >= NSEvent::doubleClickInterval()
+            }) {
+                st.pending_click.take().and_then(|(id, _)| {
+                    st.items.iter().position(|p| p.id == id && p.fall.is_none())
+                })
+            } else {
+                None
+            }
+        };
+        if let Some(index) = click {
+            self.preview(index);
+        }
         self.drain_pending();
         self.update_reveal(now);
         let over_card = self.update_hover();
 
         let mut st = self.ivars().state.borrow_mut();
         let width = st.width;
+        let previous_slide = st.slide;
+        let had_bubbles = st.items.iter().any(|p| p.bubble.is_some());
         let count = st.items.len();
-        if now >= st.breeze_at && !st.items.is_empty() && st.dragging.is_none() {
-            for item in st.items.iter_mut() {
-                if item.fall.is_some() {
-                    continue;
-                }
-                let delay = pseudo(0.0, 0.35);
-                let degrees = pseudo(1.6, 3.4);
-                item.gust = Some((now + Duration::from_secs_f64(delay), degrees));
-            }
-            st.breeze_at = now + Duration::from_secs_f64(pseudo(7.0, 12.0));
-        }
+        let reduced = NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+        st.reduced_motion = reduced;
+        let pointer_x = st.pointer.map(|p| p.x);
         let mut gone = Vec::new();
         for (index, item) in st.items.iter_mut().enumerate() {
-            if let Some((at, degrees)) = item.gust {
-                if now >= at {
-                    nudge(&mut item.swing_v, degrees);
-                    item.gust = None;
-                }
-            }
             let target = layout_x(index, count, width);
             let (dx, dx_v) = LAYOUT.step(item.x - target, item.x_v, dt);
             item.x = target + dx;
             item.x_v = dx_v;
-            let (swing, swing_v) = SWING.step(item.swing, item.swing_v, dt);
-            item.swing = swing;
+            let target_swing = if item.hover && !reduced {
+                pointer_x
+                    .map(|x| ((x - item.x) / CARD_W * 5.0).clamp(-2.5, 2.5))
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let (swing, swing_v) = SWING.step(item.swing - target_swing, item.swing_v, dt);
+            item.swing = target_swing + swing;
             item.swing_v = swing_v;
             if !item.arrived {
                 let (drop, drop_v) = ARRIVE.step(item.drop, item.drop_v, dt);
@@ -587,10 +706,18 @@ impl LineView {
             let mix = item.hover_mix
                 + ((if hovered { 1.0 } else { 0.0 }) - item.hover_mix) * (dt * 12.0).min(1.0);
             item.hover_mix = mix;
+            if reduced {
+                item.x = target;
+                item.x_v = 0.0;
+                item.swing = 0.0;
+                item.swing_v = 0.0;
+                item.drop = 0.0;
+                item.arrived = true;
+            }
             if let Some(t) = item.fall {
                 let t = t + dt;
                 item.fall = Some(t);
-                if t >= FALL_DUR {
+                if t >= FALL_DUR || reduced {
                     gone.push(item.id);
                 }
             }
@@ -614,12 +741,16 @@ impl LineView {
         let (slide, slide_v) = spring.step(st.slide - target, st.slide_v, dt);
         st.slide = target + slide;
         st.slide_v = slide_v;
+        if reduced {
+            st.slide = target;
+            st.slide_v = 0.0;
+        }
 
-        // 飞行：0.65 秒飞到绳子上的位置，落下时轻轻晃一下。
+        // 一次性入场；减少动态效果时直接到达。
         let mut landed = false;
         if st.flight.active {
             st.flight.t += dt;
-            if st.flight.t >= FLIGHT_DUR {
+            if st.flight.t >= FLIGHT_DUR || reduced {
                 st.flight.active = false;
                 landed = true;
             }
@@ -629,23 +760,37 @@ impl LineView {
             if let Some(item) = self.ivars().state.borrow_mut().items.last_mut() {
                 item.flying = false;
                 item.arrived = true;
-                nudge(&mut item.swing_v, 2.2);
+                if !reduced {
+                    nudge(&mut item.swing_v, 2.5);
+                }
             }
         }
 
         let st = self.ivars().state.borrow();
         let visible = st.slide > 0.001 || st.revealed;
         let flying = st.flight.active;
+        let animating = (previous_slide - st.slide).abs() > 0.0001
+            || st.slide_v.abs() > 0.001
+            || !gone.is_empty()
+            || had_bubbles
+            || st.items.iter().any(|p| {
+                p.fall.is_some()
+                    || p.x_v.abs() > 0.01
+                    || p.swing_v.abs() > 0.01
+                    || p.drop_v.abs() > 0.01
+                    || (p.hover_mix - if p.hover { 1.0 } else { 0.0 }).abs() > 0.001
+            });
         drop(st);
-        if visible || flying {
+        if (visible && animating) || flying {
             self.setNeedsDisplay(true);
         }
         // 绳子横贯屏幕：只有指针压在卡片上时窗口才收点击，其余地方一律穿过去。
         let want_clicks = visible && over_card;
         let mut st = self.ivars().state.borrow_mut();
-        if want_clicks != st.clickable {
-            st.clickable = want_clicks;
-            drop(st);
+        let clicks_changed = want_clicks != st.clickable;
+        st.clickable = want_clicks;
+        drop(st);
+        if clicks_changed {
             if let Some(panel) = panel_target() {
                 panel.setIgnoresMouseEvents(!want_clicks);
             }
@@ -688,43 +833,32 @@ impl LineView {
         if !self.ivars().state.borrow().enabled {
             return;
         }
+        self.place();
         let full_w = CGImage::width(Some(&pending.image)) as f64;
         let full_h = CGImage::height(Some(&pending.image)) as f64;
-        let card_ratio = (CARD_W - 14.0) / PHOTO_MAX_H;
-        let crop_h = (full_w / card_ratio).min(full_h);
-        let cropped = (crop_h + 0.5 < full_h).then(|| {
-            CGImage::with_image_in_rect(
-                Some(&pending.image),
-                CGRect::new(
-                    CGPoint::new(0.0, 0.0),
-                    CGSize::new(full_w, crop_h),
-                ),
-            )
-        });
-        let source: &CGImage = cropped
-            .as_ref()
-            .and_then(|image| image.as_deref())
-            .unwrap_or(&pending.image);
-        let px = full_w / 2.0;
-        let py = crop_h / 2.0;
         let image = NSImage::initWithCGImage_size(
             NSImage::alloc(),
-            source,
-            NSSize::new(px.max(1.0), py.max(1.0)),
+            &pending.image,
+            NSSize::new(full_w.max(1.0), full_h.max(1.0)),
         );
-        let photo = fit(NSSize::new(px.max(1.0), py.max(1.0)));
-        let tilt = pseudo(-2.5, 2.5);
         let mut st = self.ivars().state.borrow_mut();
         let id = st.next_id;
         st.next_id += 1;
+        let (hanger, tilt) = hanging_style(id);
         let start_x = layout_x(st.items.len(), st.items.len() + 1, st.width);
+        // Finish any previous arrival before replacing the shared flight.
+        for item in &mut st.items {
+            item.flying = false;
+            item.arrived = true;
+        }
         // 新的一律挂在最右边。
         st.items.push(Peg {
             id,
             path: pending.path,
             image: image.clone(),
-            photo,
             video: pending.video,
+            duration: pending.duration,
+            hanger,
             tilt,
             swing: 0.0,
             swing_v: 0.0,
@@ -737,7 +871,6 @@ impl LineView {
             fall: None,
             hover: false,
             hover_mix: 0.0,
-            gust: None,
             bubble: None,
         });
         if st.items.len() > MAX_ITEMS {
@@ -745,7 +878,7 @@ impl LineView {
                 oldest.fall = Some(0.0);
             }
         }
-        let card = NSSize::new(photo.width + INSET * 2.0, photo.height + INSET * 2.0);
+        let card = NSSize::new(CARD_W, PHOTO_MAX_H + INSET * 2.0 + 24.0);
         let (from, to) = flight_rects(&st, pending.region, card);
         st.flight = Flight {
             active: true,
@@ -779,20 +912,20 @@ impl LineView {
         {
             let mut st = self.ivars().state.borrow_mut();
             st.screen = screen.frame();
+            st.width = frame.size.width;
+            st.height = frame.size.height;
             st.panel_top = max_y(&screen.frame()) - max_y(&visible);
         }
         if let Some(panel) = panel_target() {
-            if rect_eq(panel.frame(), frame) {
-                return;
+            if !rect_eq(panel.frame(), frame) {
+                panel.setFrame_display(frame, true);
             }
-            panel.setFrame_display(frame, true);
         }
         if let Some(panel) = flight_targets().map(|(p, _)| p) {
             let f = screen.frame();
-            if rect_eq(panel.frame(), f) {
-                return;
+            if !rect_eq(panel.frame(), f) {
+                panel.setFrame_display(f, true);
             }
-            panel.setFrame_display(f, true);
         }
     }
 
@@ -812,11 +945,20 @@ impl LineView {
         } else {
             st.pointer = None;
         }
-        let in_band = point_in(mouse, band);
+        let in_menu = point_in(mouse, band);
+        let in_band = st.anchor.is_some_and(|a| {
+            point_in(
+                mouse,
+                NSRect::new(
+                    NSPoint::new(a.origin.x - 10.0, a.origin.y),
+                    NSSize::new(a.size.width + 20.0, a.size.height),
+                ),
+            )
+        });
         if !in_band {
             st.suppressed = false;
         }
-        if NSEvent::pressedMouseButtons() != 0 && in_band {
+        if NSEvent::pressedMouseButtons() != 0 && in_menu {
             // 在菜单栏里点了一下：收起来，等指针离开再恢复正常。
             st.suppressed = true;
             st.revealed = false;
@@ -831,7 +973,7 @@ impl LineView {
             return;
         }
         let peeking = st.peek_until.map(|until| now < until).unwrap_or(false);
-        if !st.revealed && st.hover_enabled && in_band && !st.suppressed {
+        if !st.revealed && !st.items.is_empty() && st.hover_enabled && in_band && !st.suppressed {
             let since = st.dwell.unwrap_or(now);
             st.dwell = Some(since);
             if now.duration_since(since) >= Duration::from_secs_f64(REVEAL_DELAY) {
@@ -845,7 +987,14 @@ impl LineView {
         } else {
             st.dwell = None;
         }
-        if st.revealed && !st.pinned && !peeking && st.dragging.is_none() {
+        if st.revealed
+            && !st.pinned
+            && !peeking
+            && st.dragging.is_none()
+            && st.pending_click.is_none()
+            && st.context_id.is_none()
+            && !crate::preview::is_visible()
+        {
             let mut zone = NSRect::new(
                 NSPoint::new(band.origin.x, 0.0),
                 NSSize::new(band.size.width, 0.0),
@@ -878,6 +1027,16 @@ impl LineView {
         for (index, item) in st.items.iter_mut().enumerate() {
             item.hover = matches!(hit, Some((i, _)) if i == index);
         }
+        let tip = hit.map(|(_, part)| match part {
+            Hit::Close => "从晾衣绳移除（保留文件）",
+            Hit::Annotate => "标注截图",
+            Hit::Card => "单击预览 · 双击打开 · 拖拽使用 · 右键更多操作",
+        });
+        let tooltip = hit.map(|(index, part)| (st.items[index].id, part));
+        if tooltip != st.tooltip {
+            st.tooltip = tooltip;
+            self.setToolTip(tip.map(NSString::from_str).as_deref());
+        }
         let hand = hit.is_some();
         if hand != st.hand {
             st.hand = hand;
@@ -900,11 +1059,11 @@ impl LineView {
             if item.flying || item.fall.is_some() {
                 return;
             }
-            let ay = rope_y(item.x, st.width) - PIN_ABOVE + item.drop;
+            let ay = rope_y(item.x, st.width, st.items.len()) + item.drop;
             let card = flip(
                 st.height,
                 item.x - item.card_w() / 2.0,
-                ay + CARD_TOP,
+                ay + item.top_offset(),
                 item.card_w(),
                 item.card_h(),
             );
@@ -949,14 +1108,14 @@ impl LineView {
             return;
         };
         if operation.contains(NSDragOperation::Delete) {
-            if let Some(index) = self
+            let index = self
                 .ivars()
                 .state
                 .borrow()
                 .items
                 .iter()
-                .position(|i| i.id == id)
-            {
+                .position(|i| i.id == id);
+            if let Some(index) = index {
                 self.take_off(index, true);
             }
         }
@@ -979,48 +1138,73 @@ impl LineView {
         ) else {
             return;
         };
-        let photo = fit(image.size());
         let mut st = self.ivars().state.borrow_mut();
         if let Some(item) = st.items.iter_mut().find(|i| i.path == path) {
             item.image = image;
-            item.photo = photo;
             item.video = !is_image_path(&item.path);
             item.bubble = Some(("已保存".to_string(), Instant::now()));
-            nudge(&mut item.swing_v, 3.0);
         }
     }
 
-    /// 卡片下面冒一句话，顺便让它轻轻晃一下。
+    /// 卡片下面显示操作反馈。
     fn note(&self, index: usize, text: &str) {
         let mut st = self.ivars().state.borrow_mut();
         if let Some(item) = st.items.get_mut(index) {
             item.bubble = Some((text.to_string(), Instant::now()));
-            nudge(&mut item.swing_v, 3.0);
         }
     }
 
-    /// 叉：从绳上取下（按住 ⌥ 连文件一起丢进废纸篓）。
-    fn take_off(&self, index: usize, trash: bool) {
-        let path = {
-            let mut st = self.ivars().state.borrow_mut();
-            let Some(item) = st.items.get_mut(index) else {
-                return;
-            };
-            if item.fall.is_some() {
-                return;
-            }
-            item.fall = Some(0.0);
-            item.hover = false;
-            item.path.clone()
+    /// Removing a card and trashing its file are separate, explicit actions.
+    fn take_off(&self, index: usize, trash: bool) -> bool {
+        let Some(path) = self.path_at(index) else {
+            return false;
         };
         if trash {
             let url = NSURL::fileURLWithPath_isDirectory(
                 &NSString::from_str(&path.to_string_lossy()),
                 false,
             );
-            let _ = objc2_foundation::NSFileManager::defaultManager()
-                .trashItemAtURL_resultingItemURL_error(&url, None);
+            if objc2_foundation::NSFileManager::defaultManager()
+                .trashItemAtURL_resultingItemURL_error(&url, None)
+                .is_err()
+            {
+                self.note(index, "无法移到废纸篓，文件仍保留");
+                return false;
+            }
         }
+        if let Some(item) = self.ivars().state.borrow_mut().items.get_mut(index) {
+            item.fall = Some(0.0);
+            item.hover = false;
+        }
+        true
+    }
+
+    fn preview(&self, index: usize) {
+        let Some(path) = self.path_at(index) else {
+            return;
+        };
+        if !path.exists() {
+            self.note(index, "文件已不在原处");
+            return;
+        }
+        let (video, anchor) = {
+            let st = self.ivars().state.borrow();
+            let item = &st.items[index];
+            let rect = flip(
+                st.height,
+                item.x - item.card_w() / 2.0,
+                rope_y(item.x, st.width, st.items.len()) + item.top_offset(),
+                item.card_w(),
+                item.card_h(),
+            );
+            (
+                item.video,
+                panel_target()
+                    .map(|p| p.convertRectToScreen(rect))
+                    .unwrap_or(rect),
+            )
+        };
+        crate::preview::show(path, video, anchor);
     }
 
     fn open(&self, index: usize) {
@@ -1030,10 +1214,8 @@ impl LineView {
             self.note(index, "文件已不在原处");
             return;
         }
-        let url = NSURL::fileURLWithPath_isDirectory(
-            &NSString::from_str(&path.to_string_lossy()),
-            false,
-        );
+        let url =
+            NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&path.to_string_lossy()), false);
         let _ = NSWorkspace::sharedWorkspace().openURL(&url);
     }
 
@@ -1051,7 +1233,6 @@ impl LineView {
         let mut st = self.ivars().state.borrow_mut();
         if let Some(item) = st.items.get_mut(index) {
             item.bubble = Some(("已显示".to_string(), Instant::now()));
-            nudge(&mut item.swing_v, 3.0);
         }
     }
 
@@ -1065,6 +1246,8 @@ impl LineView {
         st.enabled = enabled;
         st.hover_enabled = hover;
         if !enabled {
+            crate::preview::close();
+            st.pending_click = None;
             st.revealed = false;
             st.pinned = false;
             st.peek_until = None;
@@ -1075,6 +1258,8 @@ impl LineView {
         let mut st = self.ivars().state.borrow_mut();
         st.busy = busy;
         if busy {
+            crate::preview::close();
+            st.pending_click = None;
             st.revealed = false;
             st.pinned = false;
             st.peek_until = None;
@@ -1089,10 +1274,17 @@ impl LineView {
         st.peek_until = None;
         if st.pinned {
             st.dwell = None;
+            st.focused = st.items.last().map(|p| p.id);
+            drop(st);
+            if let Some(panel) = panel_target() {
+                panel.makeKeyAndOrderFront(None);
+                panel.makeFirstResponder(Some(self));
+            }
         }
     }
 
     fn clear(&self) {
+        crate::preview::close();
         let mut st = self.ivars().state.borrow_mut();
         for item in st.items.iter_mut() {
             if item.fall.is_none() {
@@ -1148,13 +1340,6 @@ fn fit(size: NSSize) -> NSSize {
     }
     let scale = (max_w / size.width).min(max_h / size.height);
     NSSize::new(size.width * scale, size.height * scale)
-}
-
-/// 没有随机数库，用时间搓一个够用的伪随机数。
-fn pseudo(from: f64, to: f64) -> f64 {
-    let nanos = Instant::now().elapsed().subsec_nanos();
-    let unit = ((nanos % 100_000) as f64) / 100_000.0;
-    from + (to - from) * unit
 }
 
 fn ease_in_out_cubic(x: f64) -> f64 {
@@ -1214,7 +1399,7 @@ fn flight_rects(st: &LineState, region: Option<Rect>, card: NSSize) -> (NSRect, 
     let sh = screen.size.height.max(1.0);
     let from_top = match region {
         Some(r) => NSRect::new(
-            NSPoint::new(r.x, r.y),
+            NSPoint::new(r.x - screen.origin.x, sh - (r.y - screen.origin.y) - r.h),
             NSSize::new(r.w.max(2.0), r.h.max(2.0)),
         ),
         None => NSRect::new(
@@ -1224,11 +1409,9 @@ fn flight_rects(st: &LineState, region: Option<Rect>, card: NSSize) -> (NSRect, 
     };
     let index = st.items.len().saturating_sub(1);
     let x = layout_x(index, st.items.len().max(1), st.width);
-    let top = rope_y(x, st.width) - PIN_ABOVE + CARD_TOP;
-    let to_top = NSRect::new(
-        NSPoint::new(x + (min_x(&screen) * 0.0), st.panel_top + top),
-        card,
-    );
+    let offset = st.items.last().map(Peg::top_offset).unwrap_or(32.0);
+    let top = rope_y(x, st.width, st.items.len()) + offset;
+    let to_top = NSRect::new(NSPoint::new(x - card.width / 2.0, st.panel_top + top), card);
     (
         flip(
             sh,
@@ -1289,7 +1472,7 @@ fn draw_line(view: &LineView) {
     let dy = HIDDEN * (1.0 - st.slide);
     CGContext::save_g_state(Some(&ctx));
     CGContext::translate_ctm(Some(&ctx), 0.0, dy);
-    draw_rope(w, h);
+    draw_rope(w, h, st.items.len());
     if st.items.is_empty() {
         draw_hint(w, h);
     }
@@ -1298,8 +1481,8 @@ fn draw_line(view: &LineView) {
             continue;
         }
         let fall = item.fall.map(|t| (t / FALL_DUR).clamp(0.0, 1.0).powi(3));
-        let ay = rope_y(item.x, w) - PIN_ABOVE + item.drop + FALL_DISTANCE * fall.unwrap_or(0.0);
-        let extra_tilt = fall.map(|e| (item.tilt * 7.0 + 20.0) * e).unwrap_or(0.0);
+        let ay =
+            rope_y(item.x, w, st.items.len()) + item.drop + FALL_DISTANCE * fall.unwrap_or(0.0);
         let alpha =
             ((item.x.min(w - item.x) / 90.0).min(1.0)).max(0.0) * (1.0 - fall.unwrap_or(0.0));
         if alpha <= 0.01 {
@@ -1308,18 +1491,21 @@ fn draw_line(view: &LineView) {
         let card = flip(
             h,
             item.x - item.card_w() / 2.0,
-            ay + CARD_TOP,
+            ay + item.top_offset(),
             item.card_w(),
             item.card_h(),
         );
-        let theta = item.swing + item.tilt + extra_tilt;
-        let scale = 1.0 + 0.035 * item.hover_mix;
+        let theta = if st.reduced_motion {
+            0.0
+        } else {
+            item.swing + item.tilt
+        };
         CGContext::save_g_state(Some(&ctx));
         CGContext::set_alpha(Some(&ctx), alpha);
         CGContext::translate_ctm(Some(&ctx), item.x, h - ay);
         CGContext::rotate_ctm(Some(&ctx), -theta.to_radians());
-        CGContext::scale_ctm(Some(&ctx), scale, scale);
         CGContext::translate_ctm(Some(&ctx), -item.x, -(h - ay));
+        draw_suspension(card, NSPoint::new(item.x, h - ay), 1.0);
         draw_card(
             Some(&ctx),
             card,
@@ -1329,7 +1515,43 @@ fn draw_line(view: &LineView) {
             1.0,
             item.hover_mix,
         );
+        if st.focused == Some(item.id) && panel_target().is_some_and(|p| p.isKeyWindow()) {
+            NSColor::keyboardFocusIndicatorColor().setStroke();
+            let ring = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                inset_rect(card, -2.0),
+                RADIUS + 2.0,
+                RADIUS + 2.0,
+            );
+            ring.setLineWidth(2.0);
+            ring.stroke();
+        }
         draw_clip(Some(&ctx), card, 1.0);
+        let long = item.image.size().height > item.image.size().width * 2.0;
+        let label = if item.video {
+            "录屏"
+        } else if long {
+            "长截图"
+        } else {
+            "截图"
+        };
+        let label = NSString::from_str(label);
+        let attrs = text_attrs(11.0, false);
+        unsafe {
+            label.drawAtPoint_withAttributes(
+                NSPoint::new(card.origin.x + 8.0, card.origin.y + 5.0),
+                Some(&attrs),
+            );
+        }
+        if let Some(duration) = &item.duration {
+            let text = NSString::from_str(duration);
+            let size = unsafe { text.sizeWithAttributes(Some(&attrs)) };
+            unsafe {
+                text.drawAtPoint_withAttributes(
+                    NSPoint::new(card.max().x - size.width - 8.0, card.origin.y + 5.0),
+                    Some(&attrs),
+                );
+            }
+        }
         if item.video {
             draw_play(card, 1.0);
         }
@@ -1347,49 +1569,23 @@ fn draw_line(view: &LineView) {
     CGContext::restore_g_state(Some(&ctx));
 }
 
-fn draw_rope(w: f64, h: f64) {
+fn draw_rope(w: f64, h: f64, count: usize) {
     if w <= 0.0 {
         return;
     }
-    let steps = 72usize;
-    let ctrl = ROPE_TOP + 2.0 * sag(w);
-    let (x0, x2) = (-20.0, w + 20.0);
-    let point = |t: f64| -> (f64, f64) {
-        let u = 1.0 - t;
-        (
-            u * u * x0 + 2.0 * u * t * (w / 2.0) + t * t * x2,
-            u * u * ROPE_TOP + 2.0 * u * t * ctrl + t * t * ROPE_TOP,
-        )
-    };
-    let mut pts = Vec::with_capacity(steps + 1);
-    for i in 0..=steps {
-        pts.push(point(i as f64 / steps as f64));
-    }
-    // 三遍：投影、绳子本体、上面那道高光。
-    let passes: [(f64, f64, f64, f64); 3] = [
-        (0.22, 1.4, -1.2, 0.0),
-        (1.0, 1.2, 0.0, 0.55),
-        (0.45, 0.4, 0.35, 1.0),
-    ];
-    for (alpha, width, shift, gray) in passes {
-        for i in 0..steps {
-            let (ax, ay) = pts[i];
-            let (bx, by) = pts[i + 1];
-            let a = alpha * end_fade(ax / w).min(end_fade(bx / w));
-            if a <= 0.004 {
-                continue;
-            }
-            let path = NSBezierPath::bezierPath();
-            path.setLineWidth(width);
-            path.moveToPoint(NSPoint::new(ax, h - ay + shift));
-            path.lineToPoint(NSPoint::new(bx, h - by + shift));
-            if gray > 0.9 {
-                NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, a).setStroke();
-            } else {
-                NSColor::colorWithSRGBRed_green_blue_alpha(gray, gray, gray, a).setStroke();
-            }
-            path.stroke();
-        }
+    let (left, length) = rope_span(w, count);
+    for i in 0..64 {
+        let x = left + length * i as f64 / 64.0;
+        let next = left + length * (i + 1) as f64 / 64.0;
+        let alpha = end_fade((i as f64 + 0.5) / 64.0) * 0.45;
+        NSColor::secondaryLabelColor()
+            .colorWithAlphaComponent(alpha)
+            .setStroke();
+        let path = NSBezierPath::bezierPath();
+        path.setLineWidth(1.1);
+        path.moveToPoint(NSPoint::new(x, h - rope_y(x, w, count)));
+        path.lineToPoint(NSPoint::new(next, h - rope_y(next, w, count)));
+        path.stroke();
     }
 }
 
@@ -1410,22 +1606,38 @@ fn draw_card(
         0.0,
         0.0,
         0.0,
-        0.18 + 0.08 * lift,
+        0.12 + 0.04 * lift,
     )));
     shadow.setShadowOffset(NSSize::new(0.0, -5.0 - 3.0 * lift));
-    shadow.setShadowBlurRadius(10.0 + 4.0 * lift);
+    shadow.setShadowBlurRadius(8.0 + 2.0 * lift);
     shadow.set();
-    NSColor::colorWithSRGBRed_green_blue_alpha(0.97, 0.98, 1.0, 0.72).setFill();
+    NSColor::controlBackgroundColor().setFill();
     path.fill();
     CGContext::restore_g_state(ctx);
 
     if let Some(image) = image {
-        let inner = inset_rect(card, inset);
+        let mut inner = inset_rect(card, inset);
+        inner.origin.y += 24.0 * chrome;
+        inner.size.height = (inner.size.height - 24.0 * chrome).max(1.0);
         let r = (radius - inset).max(0.0);
         let inner_path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(inner, r, r);
         CGContext::save_g_state(ctx);
         inner_path.addClip();
-        image.drawInRect(inner);
+        let size = image.size();
+        let scale =
+            (inner.size.width / size.width.max(1.0)).min(inner.size.height / size.height.max(1.0));
+        let fitted = if chrome >= 0.999 {
+            fit(size)
+        } else {
+            NSSize::new(size.width * scale, size.height * scale)
+        };
+        image.drawInRect(NSRect::new(
+            NSPoint::new(
+                inner.origin.x + (inner.size.width - fitted.width) / 2.0,
+                inner.origin.y + (inner.size.height - fitted.height) / 2.0,
+            ),
+            fitted,
+        ));
         CGContext::restore_g_state(ctx);
         inner_path.setLineWidth(0.5);
         NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.18 * chrome).setStroke();
@@ -1433,7 +1645,9 @@ fn draw_card(
     }
 
     path.setLineWidth(0.75);
-    NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.55 * chrome).setStroke();
+    NSColor::labelColor()
+        .colorWithAlphaComponent(0.12 * chrome)
+        .setStroke();
     path.stroke();
     let outer = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
         inset_rect(card, -0.5),
@@ -1445,38 +1659,49 @@ fn draw_card(
     outer.stroke();
 }
 
-/// 夹子：一枚拉丝金属的小夹子，顶上有一道夹着绳子的缝。
-fn draw_clip(ctx: Option<&CGContext>, card: NSRect, chrome: f64) {
-    let size = NSSize::new(9.0, 26.0);
-    let r = NSRect::new(
-        NSPoint::new(
-            card.origin.x + card.size.width / 2.0 - size.width / 2.0,
-            card.origin.y + card.size.height - 12.0,
+/// A fine suspension wire and small eyelet, matching the hanging-card metaphor.
+fn draw_suspension(card: NSRect, pivot: NSPoint, chrome: f64) {
+    let wire = NSBezierPath::bezierPath();
+    wire.setLineWidth(0.8);
+    wire.moveToPoint(pivot);
+    wire.lineToPoint(NSPoint::new(pivot.x, card.max().y + 5.0));
+    NSColor::secondaryLabelColor()
+        .colorWithAlphaComponent(0.36 * chrome)
+        .setStroke();
+    wire.stroke();
+    let anchor = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+        NSPoint::new(pivot.x - 2.5, pivot.y - 2.5),
+        NSSize::new(5.0, 5.0),
+    ));
+    NSColor::tertiaryLabelColor()
+        .colorWithAlphaComponent(chrome * 0.35)
+        .setFill();
+    anchor.fill();
+}
+
+fn draw_clip(_ctx: Option<&CGContext>, card: NSRect, chrome: f64) {
+    let cx = card.origin.x + card.size.width / 2.0;
+    let ring = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+        NSPoint::new(cx - 3.5, card.max().y + 1.0),
+        NSSize::new(7.0, 7.0),
+    ));
+    ring.setLineWidth(1.4);
+    NSColor::secondaryLabelColor()
+        .colorWithAlphaComponent(chrome * 0.5)
+        .setStroke();
+    ring.stroke();
+    let clasp = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+        NSRect::new(
+            NSPoint::new(cx - 6.0, card.max().y - 2.5),
+            NSSize::new(12.0, 5.0),
         ),
-        size,
+        2.0,
+        2.0,
     );
-    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, 3.5, 3.5);
-    CGContext::save_g_state(ctx);
-    path.addClip();
-    let metal = NSGradient::initWithStartingColor_endingColor(
-        NSGradient::alloc(),
-        &NSColor::colorWithSRGBRed_green_blue_alpha(0.70, 0.70, 0.72, chrome),
-        &NSColor::colorWithSRGBRed_green_blue_alpha(0.93, 0.93, 0.95, chrome),
-    );
-    if let Some(metal) = metal {
-        metal.drawInRect_angle(r, 0.0);
-    }
-    CGContext::restore_g_state(ctx);
-    path.setLineWidth(0.6);
-    NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.85 * chrome).setStroke();
-    path.stroke();
-    let slot = NSRect::new(
-        NSPoint::new(r.origin.x + 2.0, r.origin.y + size.height - 8.5 - 1.4),
-        NSSize::new(5.0, 1.4),
-    );
-    let slot_path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(slot, 0.7, 0.7);
-    NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.32 * chrome).setFill();
-    slot_path.fill();
+    NSColor::secondaryLabelColor()
+        .colorWithAlphaComponent(chrome * 0.5)
+        .setFill();
+    clasp.fill();
 }
 
 /// 视频都是「第一帧 + 一个播放键」。
@@ -1541,7 +1766,7 @@ fn text_attrs(size: f64, white: bool) -> Retained<NSMutableDictionary<NSString, 
         let color = if white {
             NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.95)
         } else {
-            NSColor::colorWithSRGBRed_green_blue_alpha(0.08, 0.09, 0.11, 0.9)
+            NSColor::labelColor()
         };
         let object: &AnyObject = &*color;
         attrs.setObject_forKey(
@@ -1598,17 +1823,17 @@ fn draw_bubble(card: NSRect, text: &str) {
 }
 
 fn draw_hint(w: f64, h: f64) {
-    let text = NSString::from_str("录完一段视频，它会挂在这里");
+    let text = NSString::from_str("截图与录屏会出现在这里");
     let attrs = text_attrs(12.0, false);
     let size = unsafe { text.sizeWithAttributes(Some(&attrs)) };
     let bw = size.width + 24.0;
     let bh = size.height + 12.0;
     let r = NSRect::new(
-        NSPoint::new(w / 2.0 - bw / 2.0, h - rope_y(w / 2.0, w) - 34.0 - bh),
+        NSPoint::new(w / 2.0 - bw / 2.0, h - rope_y(w / 2.0, w, 0) - 34.0 - bh),
         NSSize::new(bw, bh),
     );
     let capsule = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, bh / 2.0, bh / 2.0);
-    NSColor::colorWithSRGBRed_green_blue_alpha(0.92, 0.93, 0.95, 0.72).setFill();
+    NSColor::controlBackgroundColor().setFill();
     capsule.fill();
     unsafe {
         text.drawAtPoint_withAttributes(
@@ -1672,6 +1897,11 @@ pub fn init(mtm: MainThreadMarker) {
         NSPoint::new(0.0, 0.0),
         NSSize::new(1440.0, PANEL_H),
     ));
+    view.setAccessibilityElement(true);
+    unsafe {
+        view.setAccessibilityRole(Some(NSAccessibilityGroupRole));
+    }
+    view.setAccessibilityLabel(Some(&NSString::from_str("最近捕获，晾衣绳")));
     panel.setContentView(Some(&view));
 
     let flight_panel = make_panel(mtm);
@@ -1719,6 +1949,7 @@ pub fn hang_later(path: PathBuf, region: Option<Rect>) {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(Pending {
                     image,
+                    duration: video.then(|| video_duration(&path)).flatten(),
                     path,
                     region,
                     video,
@@ -1757,6 +1988,7 @@ pub fn hang_image(image: Retained<CGImage>, path: PathBuf, region: Option<Rect>)
             path,
             region,
             video: false,
+            duration: None,
         });
 }
 
@@ -1822,5 +2054,104 @@ pub fn status() -> (bool, bool, bool) {
             (st.enabled, st.hover_enabled, st.revealed || st.pinned)
         }
         None => (true, true, false),
+    }
+}
+
+/// The status item supplies the only hover trigger, in global AppKit coordinates.
+pub fn set_anchor(anchor: NSRect) {
+    if let Some(view) = line_view() {
+        view.ivars().state.borrow_mut().anchor = Some(anchor);
+    }
+}
+
+pub fn remove_path(path: &std::path::Path, trash: bool) -> bool {
+    let Some(view) = line_view() else {
+        return false;
+    };
+    let index = view
+        .ivars()
+        .state
+        .borrow()
+        .items
+        .iter()
+        .position(|i| i.path == path);
+    let Some(index) = index else { return false };
+    view.take_off(index, trash)
+}
+
+#[allow(deprecated)]
+fn video_duration(path: &std::path::Path) -> Option<String> {
+    let url =
+        NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&path.to_string_lossy()), false);
+    let asset = unsafe { AVURLAsset::assetWithURL(&url) };
+    let time: CMTime = unsafe { msg_send![&*asset, duration] };
+    if time.timescale <= 0 || time.value < 0 {
+        return None;
+    }
+    let seconds = time.value as u64 / time.timescale as u64;
+    Some(format!("{:02}:{:02}", seconds / 60, seconds % 60))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_rope_keeps_its_sag_on_wide_screens() {
+        for screen in [800.0, 1440.0, 3456.0] {
+            for count in [1, 3, 8] {
+                let (left, length) = rope_span(screen, count);
+                assert!((rope_y(left, screen, count) - ROPE_TOP).abs() < 0.001);
+                assert!((rope_y(left + length, screen, count) - ROPE_TOP).abs() < 0.001);
+                let center = rope_y(screen / 2.0, screen, count);
+                assert!(center - ROPE_TOP >= 28.0);
+                for index in 0..count {
+                    let (hanger, _) = hanging_style(index as u64 + 1);
+                    let bottom = rope_y(layout_x(index, count, screen), screen, count)
+                        + hanger
+                        + CARD_TOP
+                        + PHOTO_MAX_H
+                        + 30.0;
+                    assert!(
+                        bottom + 30.0 < PANEL_H,
+                        "card feedback must fit within the shelf"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn portrait_and_panorama_thumbnails_preserve_the_entire_aspect_ratio() {
+        for original in [
+            NSSize::new(800.0, 20_000.0),
+            NSSize::new(10_000.0, 100.0),
+            NSSize::new(1200.0, 800.0),
+        ] {
+            let fitted = fit(original);
+            assert!(fitted.width <= CARD_W && fitted.height <= PHOTO_MAX_H);
+            assert!(
+                (fitted.width / fitted.height - original.width / original.height).abs() < 0.000001
+            );
+        }
+    }
+
+    #[test]
+    fn flight_lands_on_card_center_and_starts_at_capture_coordinates() {
+        let mut state = LineState::default();
+        state.screen = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1440.0, 900.0));
+        state.width = 1440.0;
+        state.panel_top = 25.0;
+        let card = NSSize::new(CARD_W, 134.0);
+        let region = Rect {
+            x: 100.0,
+            y: 200.0,
+            w: 640.0,
+            h: 360.0,
+        };
+        let (from, to) = flight_rects(&state, Some(region), card);
+        assert_eq!(from.origin, NSPoint::new(100.0, 200.0));
+        assert_eq!(from.size, NSSize::new(640.0, 360.0));
+        assert_eq!(to.origin.x + card.width / 2.0, 720.0);
     }
 }

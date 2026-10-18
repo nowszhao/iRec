@@ -252,7 +252,7 @@ struct LineState {
     dragging: Option<u64>,
     /// 小手光标是否已经设上（只在变化时改，别去抢别的应用的光标）。
     hand: bool,
-    /// 窗口现在是否接收点击（只有指针压在卡片上时才收，其余时候点击穿过去）。
+    /// 卡片悬停或手势进行中接收事件，其他时候点击穿透。
     clickable: bool,
     tooltip: Option<(u64, Hit)>,
     anchor: Option<NSRect>,
@@ -296,6 +296,16 @@ impl Default for LineState {
             context_id: None,
             focused: None,
         }
+    }
+}
+
+impl LineState {
+    fn interacting(&self) -> bool {
+        self.press.is_some() || self.dragging.is_some()
+    }
+
+    fn wants_mouse_events(&self, visible: bool, over_card: bool) -> bool {
+        self.interacting() || (visible && over_card)
     }
 }
 
@@ -370,9 +380,10 @@ define_class!(
             _session: &NSDraggingSession,
             context: NSDraggingContext,
         ) -> NSDragOperation {
-            // App 拿副本，Finder 会移动，Dock 的废纸篓要 delete。
+            // 拖出副本，避免 Finder 移走原文件后绳上留下失效卡片。
+            // Dock 的废纸篓仍支持明确的删除操作。
             if context == NSDraggingContext::OutsideApplication {
-                NSDragOperation::Copy | NSDragOperation::Move | NSDragOperation::Delete
+                NSDragOperation::Copy | NSDragOperation::Delete
             } else {
                 NSDragOperation::empty()
             }
@@ -395,6 +406,17 @@ define_class!(
             false
         }
 
+        // 从其他 App 直接拖卡片，第一次按下就应交给卡片。
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> bool {
+            false
+        }
+
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _rect: NSRect) {
             draw_line(self);
@@ -403,11 +425,12 @@ define_class!(
         /// 绳子是横贯屏幕的一条，空白处的点击必须穿过去。
         #[unsafe(method_id(hitTest:))]
         fn hit_test(&self, point: NSPoint) -> Option<Retained<LineView>> {
-            let take = {
+            let (take, interacting) = {
                 let st = self.ivars().state.borrow();
-                st.enabled && st.slide >= 0.6
+                (st.enabled && st.slide >= 0.6, st.interacting())
             };
-            if take { self.hit(point).map(|_| self.retain()) } else { None }
+            if interacting { Some(self.retain()) }
+            else if take { self.hit(point).map(|_| self.retain()) } else { None }
         }
 
         /// 按下先记着：是点击还是拖动，等抬起或移动了才知道。
@@ -416,6 +439,8 @@ define_class!(
             let point = self.convertPoint_fromView(event.locationInWindow(), None);
             let hit = self.hit(point);
             let mut st = self.ivars().state.borrow_mut();
+            st.pending_click = None;
+            st.away = None;
             st.press = match hit {
                 Some((index, on)) => st.items.get(index).map(|item| (item.id, on, point)),
                 None => None,
@@ -436,8 +461,6 @@ define_class!(
             }
             let index = self.ivars().state.borrow().items.iter().position(|i| i.id == id);
             if let Some(index) = index {
-                self.ivars().state.borrow_mut().press = None;
-                self.ivars().state.borrow_mut().pending_click = None;
                 self.start_drag(index, event);
             }
         }
@@ -784,8 +807,8 @@ impl LineView {
         if (visible && animating) || flying {
             self.setNeedsDisplay(true);
         }
-        // 绳子横贯屏幕：只有指针压在卡片上时窗口才收点击，其余地方一律穿过去。
-        let want_clicks = visible && over_card;
+        // 按下到系统拖放结束之间持续接收事件，不能因指针离开卡片而中断手势。
+        let want_clicks = self.ivars().state.borrow().wants_mouse_events(visible, over_card);
         let mut st = self.ivars().state.borrow_mut();
         let clicks_changed = want_clicks != st.clickable;
         st.clickable = want_clicks;
@@ -958,7 +981,7 @@ impl LineView {
         if !in_band {
             st.suppressed = false;
         }
-        if NSEvent::pressedMouseButtons() != 0 && in_menu {
+        if NSEvent::pressedMouseButtons() != 0 && in_menu && !st.interacting() {
             // 在菜单栏里点了一下：收起来，等指针离开再恢复正常。
             st.suppressed = true;
             st.revealed = false;
@@ -990,7 +1013,7 @@ impl LineView {
         if st.revealed
             && !st.pinned
             && !peeking
-            && st.dragging.is_none()
+            && !st.interacting()
             && st.pending_click.is_none()
             && st.context_id.is_none()
             && !crate::preview::is_visible()
@@ -1084,12 +1107,22 @@ impl LineView {
             );
             (item.id, item.path.clone(), item.image.clone(), frame)
         };
+        if !path.exists() {
+            self.ivars().state.borrow_mut().press = None;
+            self.note(index, "文件已不在原处");
+            return;
+        }
         let url =
             NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&path.to_string_lossy()), false);
         let writer: &ProtocolObject<dyn NSPasteboardWriting> = ProtocolObject::from_ref(&*url);
         let item = NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), writer);
         unsafe { item.setDraggingFrame_contents(frame, Some(&*image as &AnyObject)) };
         let items = NSArray::from_retained_slice(&[item]);
+        {
+            let mut st = self.ivars().state.borrow_mut();
+            st.dragging = Some(id);
+            st.press = None;
+        }
         // 没人接收时卡片飞回绳上。
         let session = self.beginDraggingSessionWithItems_event_source(
             &items,
@@ -1097,7 +1130,6 @@ impl LineView {
             ProtocolObject::from_ref(self),
         );
         session.setAnimatesToStartingPositionsOnCancelOrFail(true);
-        self.ivars().state.borrow_mut().dragging = Some(id);
     }
 
     /// 拖放结束。卡片只在手动取下或清空时才离开绳子，所以拖进文件夹、对话框
@@ -2095,6 +2127,24 @@ fn video_duration(path: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_leaving_card_keeps_press_and_drag_events_until_release() {
+        let mut state = LineState::default();
+        assert!(!state.wants_mouse_events(true, false));
+        assert!(state.wants_mouse_events(true, true));
+        state.press = Some((1, Hit::Card, NSPoint::new(10.0, 10.0)));
+        assert!(state.wants_mouse_events(true, false));
+        assert!(state.interacting());
+        state.dragging = Some(1);
+        state.press = None;
+        assert!(state.wants_mouse_events(true, false));
+        assert!(state.interacting());
+        state.dragging = None;
+        assert!(!state.interacting());
+        assert!(!state.wants_mouse_events(true, false));
+        assert!(!state.wants_mouse_events(false, true));
+    }
 
     #[test]
     fn visible_rope_keeps_its_sag_on_wide_screens() {

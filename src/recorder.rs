@@ -47,23 +47,6 @@ use crate::state::{log, AudioSource, Rect, Settings};
 
 /// kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ('420v')
 const PIXEL_FORMAT_420V: u32 = 0x34323076;
-/// Set once we have asked macOS for permission, so we never nag twice in the
-/// same session.
-static ASKED_PERMISSION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Asks macOS for screen recording access (shows the system prompt if needed).
-/// Returns the state right after the call.
-pub fn request_permission(force: bool) -> bool {
-    if !force && ASKED_PERMISSION.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return unsafe { CGPreflightScreenCaptureAccess() };
-    }
-    let granted = unsafe { CGRequestScreenCaptureAccess() };
-    crate::state::log(&format!(
-        "requested screen capture access -> granted={granted}"
-    ));
-    granted
-}
-
 /// How often a movie fragment is flushed to disk (seconds).
 const MOVIE_FRAGMENT_SECONDS: u32 = 5;
 /// kAudioFormatMPEG4AAC ('aac ')
@@ -171,20 +154,7 @@ impl Recorder {
     /// `region` is in Cocoa screen coordinates (y from the bottom of the main
     /// display). `None` captures the whole main display.
     pub fn start(region: Option<Rect>, settings: &Settings) -> Result<Self, String> {
-        if !unsafe { CGPreflightScreenCaptureAccess() } {
-            request_permission(false);
-        }
-        let content = match fetch_shareable_content() {
-            Ok(content) => content,
-            Err(first_error) => {
-                if unsafe { CGPreflightScreenCaptureAccess() } {
-                    return Err(first_error);
-                }
-                request_permission(false);
-                log(&format!("first attempt failed ({first_error}), retried after permission request"));
-                fetch_shareable_content()?
-            }
-        };
+        let content = fetch_shareable_content()?;
         let display = main_display(&content)?;
         let frame = unsafe { display.frame() };
         let display_h = frame.size.height as f64;
@@ -808,16 +778,12 @@ fn dict_set_number(dict: &SettingsDict, key: &'static NSString, value: f64) {
     unsafe { dict.setObject_forKey(object, ProtocolObject::from_ref(key)) };
 }
 
-/// CoreGraphics helpers used to trigger / probe the TCC prompt.
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGPreflightScreenCaptureAccess() -> bool;
-    fn CGRequestScreenCaptureAccess() -> bool;
-}
-
-/// Retries once after asking macOS for permission, so the very first recording
-/// works right after the user grants access.
+/// Fetches capture sources without requesting access. Missing permissions are
+/// configured by dragging iRec.app into System Settings through the guide.
 pub(crate) fn fetch_shareable_content() -> Result<Retained<SCShareableContent>, String> {
+    if !crate::permissions::screen_recording() {
+        return Err("请在 iRec 的权限设置中，将应用图标拖入「录屏与系统录音」列表并确认权限。".to_string());
+    }
     let (tx, rx) = std::sync::mpsc::channel::<Result<Retained<SCShareableContent>, String>>();
     let block = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
         let result = if content.is_null() {

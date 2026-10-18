@@ -50,6 +50,9 @@ const ROPE_TOP: f64 = 10.0;
 /// 缩略图与卡片之间的留白。
 const INSET: f64 = 3.0;
 const RADIUS: f64 = 12.0;
+// 固定的中性灰芯 + 浅色细边，不随系统主题变成白线或黑线。
+// 每层依次是额外线宽、灰度、不透明度；先衬线，后绳芯。
+const WIRE_LAYERS: [(f64, f64, f64); 2] = [(1.0, 0.98, 0.60), (0.0, 0.46, 0.86)];
 /// 卡片顶边与夹子之间的距离。
 const CARD_TOP: f64 = 8.0;
 /// 绳上最多挂几张，多了最旧那张自己掉下去。
@@ -1387,9 +1390,9 @@ fn smooth(from: f64, to: f64, x: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// 绳子两端渐渐淡出，看着像从屏幕外伸过来。
+/// 只在两端短距离渐隐，主体绳段保持清晰。
 fn end_fade(t: f64) -> f64 {
-    let e = 0.08;
+    let e = 0.04;
     ((t / e).min((1.0 - t) / e)).clamp(0.0, 1.0)
 }
 
@@ -1606,17 +1609,28 @@ fn draw_rope(w: f64, h: f64, count: usize) {
         return;
     }
     let (left, length) = rope_span(w, count);
-    for i in 0..64 {
-        let x = left + length * i as f64 / 64.0;
-        let next = left + length * (i + 1) as f64 / 64.0;
-        let alpha = end_fade((i as f64 + 0.5) / 64.0) * 0.45;
-        NSColor::secondaryLabelColor()
-            .colorWithAlphaComponent(alpha)
+    let segments = 128;
+    // 整条衬线画完再画绳芯，避免分段接缝处的浅色覆盖灰芯。
+    for (extra_width, gray, opacity) in WIRE_LAYERS {
+        for i in 0..segments {
+            let x = left + length * i as f64 / segments as f64;
+            let next = left + length * (i + 1) as f64 / segments as f64;
+            let alpha = end_fade((i as f64 + 0.5) / segments as f64) * opacity;
+            NSColor::colorWithSRGBRed_green_blue_alpha(gray, gray, gray, alpha).setStroke();
+            let path = NSBezierPath::bezierPath();
+            path.setLineWidth(1.3 + extra_width);
+            path.moveToPoint(NSPoint::new(x, h - rope_y(x, w, count)));
+            path.lineToPoint(NSPoint::new(next, h - rope_y(next, w, count)));
+            path.stroke();
+        }
+    }
+}
+
+fn stroke_hanging_wire(path: &NSBezierPath, width: f64, chrome: f64) {
+    for (extra_width, gray, opacity) in WIRE_LAYERS {
+        NSColor::colorWithSRGBRed_green_blue_alpha(gray, gray, gray, opacity * chrome)
             .setStroke();
-        let path = NSBezierPath::bezierPath();
-        path.setLineWidth(1.1);
-        path.moveToPoint(NSPoint::new(x, h - rope_y(x, w, count)));
-        path.lineToPoint(NSPoint::new(next, h - rope_y(next, w, count)));
+        path.setLineWidth(width + extra_width);
         path.stroke();
     }
 }
@@ -1694,21 +1708,18 @@ fn draw_card(
 /// A fine suspension wire and small eyelet, matching the hanging-card metaphor.
 fn draw_suspension(card: NSRect, pivot: NSPoint, chrome: f64) {
     let wire = NSBezierPath::bezierPath();
-    wire.setLineWidth(0.8);
     wire.moveToPoint(pivot);
     wire.lineToPoint(NSPoint::new(pivot.x, card.max().y + 5.0));
-    NSColor::secondaryLabelColor()
-        .colorWithAlphaComponent(0.36 * chrome)
-        .setStroke();
-    wire.stroke();
+    stroke_hanging_wire(&wire, 0.95, chrome);
     let anchor = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
         NSPoint::new(pivot.x - 2.5, pivot.y - 2.5),
         NSSize::new(5.0, 5.0),
     ));
-    NSColor::tertiaryLabelColor()
-        .colorWithAlphaComponent(chrome * 0.35)
-        .setFill();
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.46, 0.46, 0.46, 0.86 * chrome).setFill();
     anchor.fill();
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.98, 0.98, 0.98, 0.60 * chrome).setStroke();
+    anchor.setLineWidth(0.8);
+    anchor.stroke();
 }
 
 fn draw_clip(_ctx: Option<&CGContext>, card: NSRect, chrome: f64) {
@@ -1717,11 +1728,7 @@ fn draw_clip(_ctx: Option<&CGContext>, card: NSRect, chrome: f64) {
         NSPoint::new(cx - 3.5, card.max().y + 1.0),
         NSSize::new(7.0, 7.0),
     ));
-    ring.setLineWidth(1.4);
-    NSColor::secondaryLabelColor()
-        .colorWithAlphaComponent(chrome * 0.5)
-        .setStroke();
-    ring.stroke();
+    stroke_hanging_wire(&ring, 1.3, chrome);
     let clasp = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
         NSRect::new(
             NSPoint::new(cx - 6.0, card.max().y - 2.5),
@@ -1730,10 +1737,11 @@ fn draw_clip(_ctx: Option<&CGContext>, card: NSRect, chrome: f64) {
         2.0,
         2.0,
     );
-    NSColor::secondaryLabelColor()
-        .colorWithAlphaComponent(chrome * 0.5)
-        .setFill();
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.39, 0.39, 0.39, 0.92 * chrome).setFill();
     clasp.fill();
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.98, 0.98, 0.98, 0.60 * chrome).setStroke();
+    clasp.setLineWidth(0.8);
+    clasp.stroke();
 }
 
 /// 视频都是「第一帧 + 一个播放键」。

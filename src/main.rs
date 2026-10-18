@@ -90,10 +90,8 @@ define_class!(
 
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
-            // Deliberately no CGRequestScreenCaptureAccess() here: preflight is
-            // unreliable on macOS 15 and requesting on every launch makes
-            // macOS re-prompt even when access was already granted. Permission
-            // is only requested when a capture actually fails.
+            // Startup checks are passive. Missing capture permissions use
+            // the drag guide, without triggering the former request dialogs.
             log("started");
             line::init(self.mtm());
             let (enabled, hover) = with_state(|s| (s.settings.line, s.settings.line_hover));
@@ -772,6 +770,9 @@ impl AppDelegate {
         // Still closing the previous file; ignore new commands for now.
         // 更新跟录制无关，不受这条限制。
         if stopping && !Self::is_update_action(&action) {
+            return;
+        }
+        if !permissions::prepare_capture(self.mtm(), &action, recording) {
             return;
         }
         match action {
@@ -2010,7 +2011,6 @@ fn menu_item(
 // permission prompt as soon as the app launches.
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    fn CGRequestScreenCaptureAccess() -> bool;
     fn CGPreflightScreenCaptureAccess() -> bool;
 }
 

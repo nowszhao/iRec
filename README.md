@@ -208,24 +208,28 @@ need to be granted again.
 
 ## Permissions
 
-On first launch iRec opens a permission guide. macOS does not allow an app to flip its own
-TCC switches, so the guide triggers the system prompts, opens the exact Screen Recording and
-Accessibility panes, and watches both states live. Use **Permission Settings…** in Settings to
-reopen it; once both rows are green, choose **Relaunch iRec**.
+On first launch iRec shows a permission overview. Choose **Start drag setup** or a row's
+**Drag setup…** button to open the matching System Settings pane and a floating guide
+containing the actual running iRec app bundle and its product icon.
 
-If recording still fails, the manual route is:
+1. Drag the **iRec icon** from the helper into the app list. For screen capture, use the upper
+   **Screen & System Audio Recording** list, not **System Audio Recording Only**.
+2. Confirm the switch or authentication requested by macOS. If the current iRec is already
+   listed, confirm its switch instead of adding another copy.
+3. iRec checks the real permission state and proceeds to the next missing permission.
+   An accepted drop alone is never treated as authorization.
 
-1. Quit iRec completely.
-2. System Settings → Privacy & Security → Screen Recording: toggle iRec off and on
-   (enable every entry if there are several).
-3. Relaunch iRec — macOS applies a grant only to processes started afterwards.
+If a permission still appears pending after enabling it, choose **Restart and check** in the
+helper. The guide resumes at the same permission after relaunch. Reopen it at any time
+through **Permission Settings…** in Settings.
 
-When a start fails, iRec opens the same permission guide; the menu status line turns into
-"⚠ Screen Recording permission not in effect — click to relaunch". The microphone is granted
-the same way under Privacy & Security → Microphone.
+Ordinary screenshots and recording require screen capture permission; automatic scrolling
+screenshots also require Accessibility. A capture action with missing permissions opens the
+drag guide before invoking capture APIs. This guide does not trigger the former Screen
+Recording or Accessibility request prompts. Users still confirm system switches and authentication.
 
-Scrolling screenshots also need iRec enabled under Privacy & Security → Accessibility so it
-can identify and restore the target page's vertical scroll position.
+Microphone access is a separate system permission. macOS does not support adding an app by
+dropping it into the microphone list; selecting microphone recording still requires system consent.
 
 Two things make a grant look revoked: rebuilding (ad-hoc signing creates a new code
 identity each time) and changing the signature or the bundle id `com.nows.irec`.

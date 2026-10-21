@@ -38,6 +38,10 @@ pub enum Action {
     ScrollShotProgress(String),
     /// Notify the main thread that scroll capture has finished or failed.
     ScrollShotFinished(ScrollShotResult),
+    /// Copy a saved screenshot image to the system pasteboard.
+    CopyImageToClipboard(PathBuf),
+    /// Copy a saved recording file reference to the system pasteboard.
+    CopyFileToClipboard(PathBuf),
     /// Region selection was dismissed without starting capture.
     ScrollShotSelectionCancelled,
     /// Open a saved image in the system Markup editor.
@@ -177,8 +181,6 @@ pub struct Settings {
     pub line: bool,
     /// 指针停在菜单栏时把绳子放下来。
     pub line_hover: bool,
-    /// 截完图是否直接打开系统标注。
-    pub markup: bool,
     /// 启动后自动检查一次更新（之后每 24 小时一次）。
     pub update_check: bool,
     /// 首次启动是否已经展示过权限引导。
@@ -198,7 +200,6 @@ impl Default for Settings {
             out_dir: dirs_desktop(),
             line: true,
             line_hover: true,
-            markup: false,
             update_check: true,
             permissions_prompted: false,
             hotkeys: Hotkeys::default(),
@@ -214,7 +215,6 @@ const KEY_FPS: &str = "fps";
 const KEY_SCALE: &str = "scale";
 const KEY_LINE: &str = "line";
 const KEY_LINE_HOVER: &str = "lineHover";
-const KEY_MARKUP: &str = "markup";
 const KEY_UPDATE_CHECK: &str = "updateCheck";
 const KEY_PERMISSIONS_PROMPTED: &str = "permissionsPrompted";
 const KEY_HOTKEYS: [&str; 4] = ["hotkey1", "hotkey2", "hotkey3", "hotkey4"];
@@ -259,12 +259,6 @@ pub fn load_persisted(settings: &mut Settings) {
         .is_some()
     {
         settings.line_hover = defaults.boolForKey(&NSString::from_str(KEY_LINE_HOVER));
-    }
-    if defaults
-        .objectForKey(&NSString::from_str(KEY_MARKUP))
-        .is_some()
-    {
-        settings.markup = defaults.boolForKey(&NSString::from_str(KEY_MARKUP));
     }
     if defaults
         .objectForKey(&NSString::from_str(KEY_UPDATE_CHECK))
@@ -317,7 +311,6 @@ pub fn persist(settings: &Settings) {
     defaults.setDouble_forKey(settings.scale, &NSString::from_str(KEY_SCALE));
     defaults.setBool_forKey(settings.line, &NSString::from_str(KEY_LINE));
     defaults.setBool_forKey(settings.line_hover, &NSString::from_str(KEY_LINE_HOVER));
-    defaults.setBool_forKey(settings.markup, &NSString::from_str(KEY_MARKUP));
     defaults.setBool_forKey(settings.update_check, &NSString::from_str(KEY_UPDATE_CHECK));
     defaults.setBool_forKey(
         settings.permissions_prompted,

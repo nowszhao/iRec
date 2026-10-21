@@ -29,7 +29,8 @@ use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSBackingStoreType, NSBezierPath, NSButton, NSButtonType, NSColor,
     NSEvent, NSFont, NSImage, NSMenu, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSPopUpButton,
-    NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
+    NSPasteboard, NSPasteboardWriting, NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow,
+    NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
 use objc2_foundation::{
@@ -209,14 +210,6 @@ define_class!(
             if let Some(path) = self.latest_shot() {
                 push_action(Action::Markup(path));
             }
-        }
-
-        #[unsafe(method(toggleMarkup:))]
-        fn toggle_markup(&self, _sender: &AnyObject) {
-            with_state(|s| {
-                s.settings.markup = !s.settings.markup;
-                persist(&s.settings);
-            });
         }
 
         #[unsafe(method(openHotkeys:))]
@@ -593,18 +586,11 @@ impl AppDelegate {
                 288.0,
             ),
             (
-                2,
-                "截图后直接打开标注",
-                sel!(toggleMarkup:),
-                settings.markup,
-                260.0,
-            ),
-            (
                 3,
                 "自动检查更新",
                 sel!(toggleUpdateCheck:),
                 settings.update_check,
-                170.0,
+                260.0,
             ),
         ] {
             let button = make_button(
@@ -737,6 +723,7 @@ impl AppDelegate {
         let line = menu_item(mtm, "显示晾衣绳", Some(sel!(toggleLine:)), self, 0);
         menu.addItem(&line);
         self.ivars().line_toggle_item.set(line).ok();
+        menu.addItem(&menu_item(mtm, "清空晾衣绳", Some(sel!(clearLine:)), self, 0));
         let settings = menu_item(mtm, "设置…", Some(sel!(showWindow:)), self, 0);
         settings.setKeyEquivalent(ns_string!(","));
         menu.addItem(&settings);
@@ -817,7 +804,7 @@ impl AppDelegate {
                 self.screenshot(Some(rect));
             }
             Action::ShotRegionAnnotated(rect) => {
-                self.screenshot_with_markup(Some(rect), Some(true));
+                self.screenshot_with_markup(Some(rect), true);
             }
             Action::PickScrollShot => match scrollshot::frontmost_target_pid() {
                 Ok(target_pid) => {
@@ -878,14 +865,12 @@ impl AppDelegate {
                     ScrollShotResult::Finished(path, bytes)
                     | ScrollShotResult::FinishedWithWarning(path, bytes, _) => {
                         line::hang_later(path.clone(), None);
+                        push_action(Action::CopyImageToClipboard(path.clone()));
                         with_state(|s| {
                             s.last_saved = Some((path.clone(), bytes));
                             s.saved_at = Some(Instant::now());
                             s.last_error = warning.clone();
                         });
-                        if with_state(|s| s.settings.markup) {
-                            push_action(Action::Markup(path));
-                        }
                     }
                     ScrollShotResult::Cancelled => {
                         log("scroll shot cancelled; original position restored");
@@ -897,8 +882,15 @@ impl AppDelegate {
             }
             Action::Markup(path) => {
                 crate::markup::edit(path, |path| {
-                    line::refresh(path);
+                    line::refresh(path.clone());
+                    push_action(Action::CopyImageToClipboard(path));
                 });
+            }
+            Action::CopyImageToClipboard(path) => {
+                copy_capture_to_clipboard(&path, true);
+            }
+            Action::CopyFileToClipboard(path) => {
+                copy_capture_to_clipboard(&path, false);
             }
             Action::SetHotkey { slot, key } => {
                 with_state(|s| {
@@ -1335,6 +1327,7 @@ impl AppDelegate {
         with_state(|s| s.stopping = true);
         std::thread::spawn(move || {
             let result = recorder.stop();
+            let clipboard_path = result.as_ref().ok().map(|(path, _, _)| path.clone());
             with_state(|s| {
                 s.stopping = false;
                 s.started_at = None;
@@ -1350,7 +1343,7 @@ impl AppDelegate {
                         s.last_error = None;
                         // 缩略图和挂上去都在后台，主线程只负责画。
                         if s.settings.line {
-                            line::hang_later(path, region);
+                            line::hang_later(path.clone(), region);
                         }
                     }
                     Err(err) => {
@@ -1359,6 +1352,9 @@ impl AppDelegate {
                     }
                 }
             });
+            if let Some(path) = clipboard_path {
+                push_action(Action::CopyFileToClipboard(path));
+            }
             line::set_busy(false);
         });
     }
@@ -1391,12 +1387,11 @@ impl AppDelegate {
 
     /// 截图：抓一帧存成 PNG，然后挂到晾衣绳上。
     fn screenshot(&self, region: Option<Rect>) {
-        self.screenshot_with_markup(region, None);
+        self.screenshot_with_markup(region, false);
     }
 
-    fn screenshot_with_markup(&self, region: Option<Rect>, markup: Option<bool>) {
+    fn screenshot_with_markup(&self, region: Option<Rect>, markup: bool) {
         let settings = with_state(|s| s.settings.clone());
-        let markup = markup.unwrap_or(settings.markup);
         crate::shot::capture(
             region,
             settings.scale,
@@ -1409,6 +1404,7 @@ impl AppDelegate {
                         s.saved_at = Some(Instant::now());
                         s.last_error = None;
                     });
+                    push_action(Action::CopyImageToClipboard(path.clone()));
                     // 标注要在主线程开，交给定时器那一轮。
                     if markup {
                         push_action(Action::Markup(path));
@@ -1426,7 +1422,9 @@ impl AppDelegate {
     fn stop_sync_if_recording(&self) {
         let recorder = with_state(|s| s.recorder.take());
         if let Some(recorder) = recorder {
-            let _ = recorder.stop();
+            if let Ok((path, _, _)) = recorder.stop() {
+                copy_capture_to_clipboard(&path, false);
+            }
             with_state(|s| {
                 s.stopping = false;
                 s.started_at = None;
@@ -1441,7 +1439,6 @@ impl AppDelegate {
             button.setState(state_value(match id {
                 0 => settings.line,
                 1 => settings.line_hover,
-                2 => settings.markup,
                 _ => settings.update_check,
             }));
             if *id == 1 {
@@ -1849,6 +1846,8 @@ fn build_main_menu(mtm: MainThreadMarker, target: &AppDelegate) -> Retained<NSMe
     settings.setKeyEquivalent(ns_string!(","));
     app_menu.addItem(&settings);
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    app_menu.addItem(&menu_item(mtm, "清空晾衣绳", Some(sel!(clearLine:)), target, 0));
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     let quit = menu_item(mtm, "退出 iRec", Some(sel!(quit:)), target, 0);
     quit.setKeyEquivalent(ns_string!("q"));
     quit.setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags::Command);
@@ -1890,6 +1889,33 @@ fn is_image(path: &Path) -> bool {
             .as_deref(),
         Some("png") | Some("jpg") | Some("jpeg") | Some("tiff") | Some("heic")
     )
+}
+
+/// Publish the completed capture to the general pasteboard on the main thread.
+fn copy_capture_to_clipboard(path: &Path, image: bool) {
+    let board = NSPasteboard::generalPasteboard();
+    board.clearContents();
+    let ok = if image {
+        NSImage::initWithContentsOfFile(
+            NSImage::alloc(),
+            &NSString::from_str(&path.to_string_lossy()),
+        )
+        .is_some_and(|image| {
+            let writer: &ProtocolObject<dyn NSPasteboardWriting> =
+                ProtocolObject::from_ref(&*image);
+            board.writeObjects(&NSArray::from_slice(&[writer]))
+        })
+    } else {
+        let url = NSURL::fileURLWithPath_isDirectory(
+            &NSString::from_str(&path.to_string_lossy()),
+            false,
+        );
+        let writer: &ProtocolObject<dyn NSPasteboardWriting> = ProtocolObject::from_ref(&*url);
+        board.writeObjects(&NSArray::from_slice(&[writer]))
+    };
+    if !ok {
+        log(&format!("clipboard: 无法复制 {}", path.display()));
+    }
 }
 
 /// 给 sh 用的单引号转义。

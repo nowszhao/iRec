@@ -144,7 +144,8 @@ Selections retain their original brightness. After dragging, press Return or cli
 confirmation button; Esc cancels. **Capture and annotate** opens the editor for that
 capture without changing your preference. Single-click a card for an image or video
 preview; long images scroll vertically. New installations do not open annotation
-automatically; existing preferences are preserved. Rounded corners and shadows belong
+automatically unless **Capture and annotate** is selected. Screenshots and recordings are
+copied to the clipboard when they finish. Rounded corners and shadows belong
 to the preview only, leaving exported PNG pixels intact.
 
 Screenshots are saved as `iRec-shot-YYYYMMDD-HHMMSS.png` and hung on the line. Annotate

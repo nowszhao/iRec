@@ -113,15 +113,9 @@ impl Permissions {
         }
     }
 
-    fn missing_for_capture(self, action: &Action) -> Option<Pane> {
+    fn missing_for_capture(self, _action: &Action) -> Option<Pane> {
         if !self.screen {
             Some(Pane::Screen)
-        } else if matches!(
-            action,
-            Action::PickScrollShot | Action::ScrollShotRegion(..)
-        ) && !self.access
-        {
-            Some(Pane::Accessibility)
         } else {
             None
         }
@@ -1025,7 +1019,20 @@ mod tests {
         assert_eq!(screen_only.missing_for_capture(&Action::ShotFull), None);
         assert_eq!(
             screen_only.missing_for_capture(&Action::PickScrollShot),
-            Some(Pane::Accessibility)
+            None,
+            "scroll capture has visual detection fallback without Accessibility permission"
+        );
+        assert_eq!(
+            screen_only.missing_for_capture(&Action::ScrollShotRegion(
+                crate::state::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                1,
+            )),
+            None
         );
         assert_eq!(
             Permissions {

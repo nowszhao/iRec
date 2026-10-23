@@ -24,7 +24,6 @@ use objc2_screen_capture_kit::{SCContentFilter, SCScreenshotManager, SCStreamCon
 
 use crate::recorder::{fetch_shareable_content, main_display, own_windows};
 use crate::scrollpreview;
-use crate::shot;
 use crate::state::{Action, Rect, ScrollShotResult, log, push_action};
 
 const CONTROL_CONTINUE: u8 = 0;
@@ -34,17 +33,24 @@ const MAX_SCROLLS: usize = 90;
 const MAX_IMAGE_HEIGHT: usize = 50_000;
 const MAX_IMAGE_PIXELS: usize = 60_000_000;
 const MAX_CAPTURE_PIXELS: usize = 20_000_000;
+const MAX_STATIONARY_SCROLLS: usize = 3;
+const MAX_UNRENDERED_SCROLLS: usize = 12;
+const OVERLAP_SAMPLE_COLUMNS: usize = 48;
+const OVERLAP_SAMPLE_ROWS: usize = 72;
+const FIXED_UI_SEARCH_START: usize = 48;
+const FIXED_UI_SEARCH_END: usize = 99;
+const FIXED_UI_MIN_RUN: usize = 8;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static CONTROL: AtomicU8 = AtomicU8::new(CONTROL_CONTINUE);
 static TARGET_PID: AtomicI32 = AtomicI32::new(0);
+static CROP_READY: AtomicBool = AtomicBool::new(false);
 static WORKER: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 type AxError = i32;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
-    fn AXIsProcessTrusted() -> bool;
     fn AXUIElementCreateSystemWide() -> *const CFType;
     fn AXUIElementCreateApplication(pid: libc::pid_t) -> *const CFType;
     fn AXUIElementGetPid(element: *const CFType, pid: *mut libc::pid_t) -> AxError;
@@ -83,14 +89,17 @@ pub fn start(rect: Rect, target_pid: libc::pid_t, scale: f64, dir: PathBuf) {
         return;
     }
     CONTROL.store(CONTROL_CONTINUE, Ordering::Release);
+    CROP_READY.store(false, Ordering::Release);
     TARGET_PID.store(target_pid, Ordering::Release);
     let worker = thread::spawn(move || {
         let result = match capture(rect, target_pid, scale, dir) {
-            Ok((path, bytes, None)) => ScrollShotResult::Finished(path, bytes),
-            Ok((path, bytes, Some(warning))) => {
-                ScrollShotResult::FinishedWithWarning(path, bytes, warning)
+            Ok(((), warning)) => ScrollShotResult::ReadyForCrop(warning),
+            Err(err) if err == "__cancelled__" || err.starts_with("__cancelled__；") => {
+                if err != "__cancelled__" {
+                    log(&format!("scroll shot cancelled; restore warning: {err}"));
+                }
+                ScrollShotResult::Cancelled
             }
-            Err(err) if err == "__cancelled__" => ScrollShotResult::Cancelled,
             Err(err) => {
                 log(&format!("scroll shot failed: {err}"));
                 ScrollShotResult::Failed(err)
@@ -136,6 +145,14 @@ pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
 
+pub fn crop_is_ready() -> bool {
+    CROP_READY.load(Ordering::Acquire)
+}
+
+pub fn set_crop_ready(ready: bool) {
+    CROP_READY.store(ready, Ordering::Release);
+}
+
 pub fn cancel_requested() -> bool {
     CONTROL.load(Ordering::Acquire) == CONTROL_CANCEL
 }
@@ -166,12 +183,9 @@ fn capture(
     target_pid: libc::pid_t,
     scale: f64,
     dir: PathBuf,
-) -> Result<(PathBuf, u64, Option<String>), String> {
-    if !unsafe { AXIsProcessTrusted() } {
-        return Err(
-            "滚动截屏需要辅助功能权限：请在系统设置 → 隐私与安全性 → 辅助功能中允许 iRec"
-                .to_string(),
-        );
+) -> Result<((), Option<String>), String> {
+    if !crate::permissions::accessibility() {
+        log("scroll shot: Accessibility permission unavailable; using visual scroll detection");
     }
     if rect.w < 80.0 || rect.h < 80.0 {
         return Err("滚动截屏选区太小，请至少框选 80 × 80 的页面区域".to_string());
@@ -204,6 +218,15 @@ fn capture(
         };
         let target = find_scroll_target(target_pid, center)?;
         let mut session = ScrollSession::new(target_pid, center, target);
+        log(&format!(
+            "scroll shot: wheel target at selection center {:.0},{:.0}; accessibility scrollbar={} value={}",
+            center.x,
+            center.y,
+            session.has_scrollbar(),
+            session
+                .value()
+                .map_or_else(|| "unavailable".to_string(), |value| format!("{value:.3}"))
+        ));
         let scale = scale.clamp(1.0, 2.0);
         let width = (rect.w * scale).round().max(2.0) as usize;
         let height = (rect.h * scale).round().max(2.0) as usize;
@@ -244,15 +267,28 @@ fn capture(
         // on the content. After this the pointer is the user's; moving it
         // outside the selection pauses the capture instead of fighting it.
         CGWarpMouseCursorPosition(center);
+        let mut no_scroll_progress = false;
+        let mut partial_stitch_warning = None;
+        let mut stitched = initial.clone();
+        let mut capture_height = initial.height;
+        let mut screens = 1;
+        let mut user_finished = false;
+        let mut last_value = session.value();
+        let mut pending_steps = Vec::new();
+        let mut previous = initial.clone();
         let inner_result = (|| {
-            let mut stitched = initial.clone();
-            let mut previous = stitched.clone();
-            let mut last_value = session.value();
+            let mut fixed_ui_checked = false;
             let mut scrolls = 0;
-            let mut screens = 1;
-            let mut user_finished = false;
             let mut last_shift = None;
+            let mut stationary_scrolls = 0;
+            let mut unrendered_scrolls = 0;
             let scroll_lines = (rect.h / 200.0).round().clamp(2.0, 4.0) as i32;
+            // CGEvent uses a negative vertical delta to move down the page.
+            // If that direction is blocked at the current edge, the capture
+            // loop retries in the opposite direction and prepends the frames.
+            let mut scroll_delta = -scroll_lines;
+            let mut tried_reverse = false;
+            let mut stitch_upward = false;
             push_action(Action::ScrollShotProgress(
                 "正在滚动截屏… 可随时完成或取消".to_string(),
             ));
@@ -272,14 +308,14 @@ fn capture(
                         PauseResult::Cancel => return Err("__cancelled__".to_string()),
                     }
                     ensure_target_frontmost(target_pid)?;
-                    post_scroll(-scroll_lines)?;
+                    // Use the same point used for AX hit testing so wheel
+                    // events keep targeting the selected scroll view even
+                    // when the pointer rests over a fixed button in the area.
+                    post_scroll_at(center, scroll_delta)?;
                     scrolls += 1;
+                    pending_steps.push(scroll_delta);
                     thread::sleep(Duration::from_millis(450));
                     if CONTROL.load(Ordering::Acquire) == CONTROL_CANCEL {
-                        let frame = capture_frame(&filter, &config)?;
-                        if !frame.is_nearly_identical(&previous) {
-                            session.record(-scroll_lines);
-                        }
                         return Err("__cancelled__".to_string());
                     }
                     if CONTROL.load(Ordering::Acquire) == CONTROL_FINISH {
@@ -294,43 +330,144 @@ fn capture(
                     (Some(before), Some(after)) => (after - before).abs() > 0.000_01,
                     _ => false,
                 };
+                let reached_scroll_end = match (last_value, value) {
+                    (Some(before), Some(after)) => session.reached_scroll_end(before, after),
+                    _ => false,
+                };
                 last_value = value;
 
                 if frame.is_nearly_identical(&previous) {
+                    stationary_scrolls += 1;
                     if finish_requested {
+                        if value_changed && !pending_steps.is_empty() {
+                            session.record_steps(&pending_steps);
+                        }
                         break;
                     }
                     if !session.has_scrollbar() {
                         thread::sleep(Duration::from_millis(300));
                         frame = capture_frame(&filter, &config)?;
-                        if frame.is_nearly_identical(&previous) {
+                        if !frame.is_nearly_identical(&previous) {
+                            stationary_scrolls = 0;
+                        } else if stationary_scrolls >= MAX_STATIONARY_SCROLLS {
+                            if retry_opposite_direction(
+                                screens,
+                                &mut tried_reverse,
+                                &mut scroll_delta,
+                                &mut stationary_scrolls,
+                                &mut pending_steps,
+                                &mut stitch_upward,
+                            ) {
+                                log(
+                                    "scroll shot: initial direction did not move content; trying reverse direction",
+                                );
+                                continue;
+                            }
+                            log(&format!(
+                                "scroll shot: no visual movement after trying both directions ({stationary_scrolls} stationary events)"
+                            ));
+                            break;
+                        } else {
+                            continue;
+                        }
+                    } else if value_changed {
+                        // Accessibility confirms the document is moving even
+                        // when this frame contains mostly blank or unchanged
+                        // pixels. Keep scrolling until content becomes visible.
+                        session.record_steps(&pending_steps);
+                        pending_steps.clear();
+                        if reached_scroll_end {
                             break;
                         }
-                    } else if value.is_some_and(|value| value >= 0.999_99) || !value_changed {
-                        break;
+                        unrendered_scrolls += 1;
+                        if unrendered_scrolls >= MAX_UNRENDERED_SCROLLS {
+                            no_scroll_progress = true;
+                            log(
+                                "scroll shot: scrollbar moved but captured pixels did not; keeping the current viewport",
+                            );
+                            break;
+                        }
+                        continue;
                     } else {
+                        if stationary_scrolls >= MAX_STATIONARY_SCROLLS {
+                            if retry_opposite_direction(
+                                screens,
+                                &mut tried_reverse,
+                                &mut scroll_delta,
+                                &mut stationary_scrolls,
+                                &mut pending_steps,
+                                &mut stitch_upward,
+                            ) {
+                                log(
+                                    "scroll shot: accessibility position did not move; trying reverse direction",
+                                );
+                                continue;
+                            }
+                            log(&format!(
+                                "scroll shot: scrollbar and pixels unchanged after trying both directions ({stationary_scrolls} stationary events)"
+                            ));
+                            break;
+                        }
                         continue;
                     }
                 }
-                if !finish_requested {
-                    session.record(-scroll_lines);
+                if !frame.is_nearly_identical(&previous) {
+                    stationary_scrolls = 0;
+                    unrendered_scrolls = 0;
                 }
-                let overlap = match find_overlap_with_hint(&previous, &frame, last_shift) {
+                // Check for a stationary footer only after confirming that
+                // the page actually moved. Otherwise a failed wheel event
+                // could make the whole viewport look like a fixed overlay.
+                if !fixed_ui_checked {
+                    fixed_ui_checked = true;
+                    if let Some(fixed_ui_top) = fixed_bottom_ui_top(&previous, &frame) {
+                        capture_height = fixed_ui_top;
+                        stitched = stitched.crop_to_height(capture_height)?;
+                        previous = previous.crop_to_height(capture_height)?;
+                        frame = frame.crop_to_height(capture_height)?;
+                        log(&format!(
+                            "scroll shot: excluded fixed bottom UI from row {fixed_ui_top}/{}",
+                            initial.height
+                        ));
+                    }
+                } else if frame.height > capture_height {
+                    frame = frame.crop_to_height(capture_height)?;
+                }
+                session.record_steps(&pending_steps);
+                pending_steps.clear();
+                let overlap = match find_frame_overlap(&previous, &frame, last_shift, stitch_upward)
+                {
                     Ok(overlap) => overlap,
-                    Err(first_error) => {
-                        // Smooth scrolling or a lazy-loading page can still be
-                        // moving when the frame arrives. Give it one more beat.
+                    Err(_) => {
+                        // Smooth scrolling or lazy rendering may still be
+                        // settling. Retry both frame orders on a fresh capture.
                         thread::sleep(Duration::from_millis(550));
-                        frame = capture_frame(&filter, &config)?;
-                        find_overlap_with_hint(&previous, &frame, last_shift).map_err(|_| {
-                            format!(
-                                "{first_error}（已重试一次；请重新框选更大的页面区域，避开固定工具栏和动画内容）"
-                            )
-                        })?
+                        frame = capture_frame(&filter, &config)?
+                            .crop_to_height_at_most(capture_height)?;
+                        match find_frame_overlap(&previous, &frame, last_shift, stitch_upward) {
+                            Ok(overlap) => overlap,
+                            Err(error) => {
+                                log(&format!(
+                                    "scroll shot: stopping after overlap retry; preserving {screens} stitched screens: {error}"
+                                ));
+                                partial_stitch_warning =
+                                    Some(format!("拼接暂停，已保留 {screens} 屏"));
+                                break;
+                            }
+                        }
                     }
                 };
+                let (overlap, detected_upward) = overlap;
+                stitch_upward = detected_upward;
                 let before = stitched.height;
-                if !stitched.append_with_overlap(&frame, overlap)? {
+                let stitched_progress = if stitch_upward {
+                    stitched.prepend_with_overlap(&frame, overlap)?
+                } else {
+                    stitched.append_with_overlap(&frame, overlap)?
+                };
+                if !stitched_progress {
+                    partial_stitch_warning =
+                        Some("长图已达到尺寸上限，保留已采集内容供裁剪".to_string());
                     break;
                 }
                 screens += 1;
@@ -347,50 +484,166 @@ fn capture(
                     "滚动截屏中：已拼接 {} 屏，可随时完成或取消",
                     screens
                 )));
-                if finish_requested || value.is_some_and(|value| value >= 0.999_99) {
+                if finish_requested {
+                    break;
+                }
+                if reached_scroll_end {
+                    log("scroll shot: accessibility scrollbar reached an edge");
                     break;
                 }
             }
 
-            if CONTROL.load(Ordering::Acquire) == CONTROL_CANCEL {
-                return Err("__cancelled__".to_string());
-            }
-            if stitched.height <= height && !user_finished {
-                return Err("页面没有可继续滚动的内容".to_string());
+            if partial_stitch_warning.is_none()
+                && (scrolls >= MAX_SCROLLS || stitched.height >= MAX_IMAGE_HEIGHT)
+            {
+                partial_stitch_warning =
+                    Some("长图已达到采集上限，保留已采集内容供裁剪".to_string());
+                log(&format!(
+                    "scroll shot: capture limit reached (scrolls={scrolls}, height={})",
+                    stitched.height
+                ));
             }
 
-            let image = stitched.to_cg_image()?;
-            let (path, bytes) = shot::save_png(&image, &dir)?;
-            log(&format!(
-                "scroll shot saved {} ({}x{})",
-                path.display(),
-                width,
-                stitched.height
-            ));
-            Ok((path, bytes))
+            Ok(())
         })();
+
+        let disposition = capture_disposition(
+            &inner_result,
+            CONTROL.load(Ordering::Acquire) == CONTROL_CANCEL,
+            screens,
+        );
+        let cancelled = disposition == CaptureDisposition::Cancelled;
+        match disposition {
+            CaptureDisposition::Complete | CaptureDisposition::Cancelled => {}
+            CaptureDisposition::PreserveForCrop(ref warning) => {
+                // A failed wheel/capture/overlap step must not throw away the
+                // already captured page. Keep the last valid stitched pixels,
+                // attempt to restore the original scroll position, and let the
+                // user trim and save what was captured.
+                let pending_moved = pending_scroll_moved(
+                    session.has_scrollbar(),
+                    last_value,
+                    session.value(),
+                    if session.has_scrollbar() {
+                        None
+                    } else {
+                        capture_frame(&filter, &config)
+                            .ok()
+                            .map(|frame| !frame.is_nearly_identical(&previous))
+                    },
+                );
+                if pending_moved {
+                    session.record_steps(&pending_steps);
+                }
+                partial_stitch_warning = Some(warning.clone());
+            }
+        }
+
+        if cancelled && !pending_steps.is_empty() {
+            let visual_moved = if session.has_scrollbar() {
+                None
+            } else {
+                capture_frame(&filter, &config)
+                    .ok()
+                    .map(|frame| !frame.is_nearly_identical(&previous))
+            };
+            if pending_scroll_moved(
+                session.has_scrollbar(),
+                last_value,
+                session.value(),
+                visual_moved,
+            ) {
+                session.record_steps(&pending_steps);
+            }
+        }
+
+        if !cancelled {
+            let stitched_height = stitched.height;
+            let completion = publish_disposition_for_crop(
+                &disposition,
+                stitched,
+                capture_height,
+                user_finished,
+                partial_stitch_warning.is_some(),
+                scale,
+                dir.clone(),
+            )?
+            .ok_or_else(|| "滚动截图结果未进入裁剪预览".to_string())?;
+            match completion {
+                StitchCompletion::NoScroll => {
+                    no_scroll_progress = true;
+                    log(&format!(
+                        "scroll shot: no stitched progress (stitched={stitched_height} viewport={capture_height} original={height}); preserving the viewport for crop"
+                    ));
+                    push_action(Action::ScrollShotProgress(
+                        "页面没有继续滚动，已保留当前画面供裁剪".to_string(),
+                    ));
+                }
+                StitchCompletion::Complete | StitchCompletion::Partial => {}
+            }
+        }
 
         // A finished long shot stays where it ended; only cancel/failure
         // rolls the page back to the original position.
-        let restore_result = if inner_result.is_ok() {
+        let restore_result = if cancelled || no_scroll_progress || partial_stitch_warning.is_some() {
+            session.restore(|| capture_frame(&filter, &config), &initial)
+        } else {
             session.skip_restore();
             Ok(())
-        } else {
-            session.restore(|| capture_frame(&filter, &config), &initial)
         };
-        match (inner_result, restore_result) {
-            (Ok((path, bytes)), Ok(())) => Ok((path, bytes, None)),
-            (Ok((path, bytes)), Err(error)) => {
-                let warning = format!("长图已保存到 {}，但{error}", path.display());
-                Ok((path, bytes, Some(warning)))
-            }
-            (Err(error), Ok(())) => Err(error),
-            (Err(error), Err(restore_error)) if error == "__cancelled__" => {
-                Err(format!("__cancelled__；{restore_error}"))
-            }
-            (Err(error), Err(restore_error)) => Err(format!("{error}；{restore_error}")),
+        if cancelled {
+            return match restore_result {
+                Ok(()) => Err("__cancelled__".to_string()),
+                Err(error) => Err(format!("__cancelled__；{error}")),
+            };
         }
+        if let Err(error) = restore_result {
+            let warning = match partial_stitch_warning {
+                Some(warning) => format!("{warning}；原位置恢复未确认"),
+                None => error,
+            };
+            log(&format!("scroll shot: crop result restore warning: {warning}"));
+            return Ok(((), Some(warning)));
+        }
+        Ok(((), partial_stitch_warning))
     })()
+}
+
+pub fn save_crop_png(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    dir: &std::path::Path,
+) -> Result<(PathBuf, u64), String> {
+    if width < 2 || height < 2 || rgba.len() != width.saturating_mul(height).saturating_mul(4) {
+        return Err("裁剪范围无效".to_string());
+    }
+    let data = unsafe { CFData::new(None, rgba.as_ptr(), rgba.len() as isize) }
+        .ok_or_else(|| "无法建立长图像素数据".to_string())?;
+    let provider = CGDataProvider::with_cf_data(Some(&data))
+        .ok_or_else(|| "无法建立长图数据源".to_string())?;
+    let color_space =
+        CGColorSpace::new_device_rgb().ok_or_else(|| "无法建立 RGB 色彩空间".to_string())?;
+    let bitmap_info = CGBitmapInfo::from_bits_retain(
+        CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
+    );
+    let image = unsafe {
+        CGImage::new(
+            width,
+            height,
+            8,
+            32,
+            width * 4,
+            Some(&color_space),
+            bitmap_info,
+            Some(&provider),
+            ptr::null(),
+            false,
+            CGColorRenderingIntent::RenderingIntentDefault,
+        )
+    }
+    .ok_or_else(|| "无法生成裁剪长图".to_string())?;
+    crate::shot::save_png(&image, dir)
 }
 
 fn wait_for_target_frontmost(target_pid: libc::pid_t) -> Result<(), String> {
@@ -512,8 +765,25 @@ impl ScrollSession {
         copy_attribute(element, "AXValue").and_then(|value| number_value(&value))
     }
 
-    fn record(&mut self, delta: i32) {
-        self.steps.push(delta);
+    fn reached_scroll_end(&self, before: f64, after: f64) -> bool {
+        let ScrollTarget::Scrollbar { element, .. } = &self.target else {
+            return false;
+        };
+        let min = copy_attribute(element, "AXMinValue")
+            .and_then(|value| number_value(&value))
+            .unwrap_or(0.0);
+        let max = copy_attribute(element, "AXMaxValue")
+            .and_then(|value| number_value(&value))
+            .unwrap_or(1.0);
+        scroll_reached_end(before, after, min, max)
+    }
+
+    fn record_steps(&mut self, steps: &[i32]) {
+        self.steps.extend_from_slice(steps);
+    }
+
+    fn restore_steps(&self) -> impl Iterator<Item = i32> + '_ {
+        self.steps.iter().rev().map(|delta| -*delta)
     }
 
     fn restore(
@@ -605,8 +875,8 @@ impl ScrollSession {
         ensure_target_frontmost(self.target_pid)
             .map_err(|_| "目标应用不在前台，未执行滚动位置回放".to_string())?;
         let _guard = CursorGuard::park(self.center);
-        for delta in self.steps.clone().into_iter().rev() {
-            post_scroll_at(self.center, -delta)?;
+        for delta in self.restore_steps() {
+            post_scroll_at(self.center, delta)?;
             thread::sleep(Duration::from_millis(180));
         }
         thread::sleep(Duration::from_millis(500));
@@ -643,8 +913,10 @@ fn find_scroll_target(pid: libc::pid_t, point: CGPoint) -> Result<ScrollTarget, 
         return Ok(ScrollTarget::Visual);
     }
     let mut element_ptr = ptr::null();
-    let system = retained_ax(unsafe { AXUIElementCreateSystemWide() })
-        .ok_or_else(|| "无法连接 macOS 辅助功能服务".to_string())?;
+    let Some(system) = retained_ax(unsafe { AXUIElementCreateSystemWide() }) else {
+        log("scroll shot: AX system element unavailable; using visual scrolling");
+        return Ok(ScrollTarget::Visual);
+    };
     let status = unsafe {
         AXUIElementCopyElementAtPosition(
             std::ptr::from_ref(&*system),
@@ -733,6 +1005,145 @@ fn usable_scrollbar(scrollbar: &CFType) -> bool {
     max > min && value >= min - 0.001 && value <= max + 0.001
 }
 
+fn scroll_reached_end(before: f64, after: f64, min: f64, max: f64) -> bool {
+    let epsilon = ((max - min).abs() * 0.000_01).max(0.000_01);
+    let moved = (after - before).abs() > epsilon;
+    moved
+        && ((after <= min + epsilon && before > min + epsilon)
+            || (after >= max - epsilon && before < max - epsilon))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StitchCompletion {
+    Complete,
+    NoScroll,
+    Partial,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CaptureDisposition {
+    Complete,
+    Cancelled,
+    PreserveForCrop(String),
+}
+
+fn capture_disposition(
+    result: &Result<(), String>,
+    cancel_requested: bool,
+    screens: usize,
+) -> CaptureDisposition {
+    match result {
+        Ok(()) => CaptureDisposition::Complete,
+        Err(error) if cancel_requested || error == "__cancelled__" => {
+            CaptureDisposition::Cancelled
+        }
+        Err(error) => {
+            log(&format!(
+                "scroll shot: preserving {screens} stitched screens after capture interruption: {error}"
+            ));
+            CaptureDisposition::PreserveForCrop(format!(
+                "拼接已暂停，保留已采集的 {screens} 屏供裁剪"
+            ))
+        }
+    }
+}
+
+fn classify_stitch_completion(
+    stitched_height: usize,
+    viewport_height: usize,
+    user_finished: bool,
+    partial_stitch: bool,
+) -> StitchCompletion {
+    if partial_stitch {
+        StitchCompletion::Partial
+    } else if stitched_height <= viewport_height && !user_finished {
+        StitchCompletion::NoScroll
+    } else {
+        StitchCompletion::Complete
+    }
+}
+
+fn publish_stitched_for_crop(
+    stitched: PixelFrame,
+    viewport_height: usize,
+    user_finished: bool,
+    partial_stitch: bool,
+    scale: f64,
+    output_dir: PathBuf,
+) -> Result<StitchCompletion, String> {
+    let completion = classify_stitch_completion(
+        stitched.height,
+        viewport_height,
+        user_finished,
+        partial_stitch,
+    );
+    scrollpreview::publish_crop_image(
+        stitched.width,
+        stitched.height,
+        scale,
+        stitched.rgba,
+        output_dir,
+    )?;
+    Ok(completion)
+}
+
+fn publish_disposition_for_crop(
+    disposition: &CaptureDisposition,
+    stitched: PixelFrame,
+    viewport_height: usize,
+    user_finished: bool,
+    partial_stitch: bool,
+    scale: f64,
+    output_dir: PathBuf,
+) -> Result<Option<StitchCompletion>, String> {
+    if *disposition == CaptureDisposition::Cancelled {
+        return Ok(None);
+    }
+    publish_stitched_for_crop(
+        stitched,
+        viewport_height,
+        user_finished,
+        partial_stitch || matches!(disposition, CaptureDisposition::PreserveForCrop(_)),
+        scale,
+        output_dir,
+    )
+    .map(Some)
+}
+
+fn retry_opposite_direction(
+    screens: usize,
+    tried_reverse: &mut bool,
+    scroll_delta: &mut i32,
+    stationary_scrolls: &mut usize,
+    pending_steps: &mut Vec<i32>,
+    stitch_upward: &mut bool,
+) -> bool {
+    if screens != 1 || *tried_reverse {
+        return false;
+    }
+    *scroll_delta = -*scroll_delta;
+    *stitch_upward = *scroll_delta > 0;
+    *tried_reverse = true;
+    *stationary_scrolls = 0;
+    // Neither visual pixels nor the scrollbar confirmed movement in the
+    // failed direction, so do not replay those unconfirmed events on restore.
+    pending_steps.clear();
+    true
+}
+
+fn pending_scroll_moved(
+    has_scrollbar: bool,
+    before: Option<f64>,
+    after: Option<f64>,
+    visual_moved: Option<bool>,
+) -> bool {
+    if has_scrollbar {
+        matches!((before, after), (Some(before), Some(after)) if (after - before).abs() > 0.000_01)
+    } else {
+        visual_moved.unwrap_or(false)
+    }
+}
+
 fn retained_ax(pointer: *const CFType) -> Option<CFRetained<CFType>> {
     NonNull::new(pointer.cast_mut()).map(|pointer| unsafe { CFRetained::from_raw(pointer) })
 }
@@ -755,14 +1166,6 @@ fn number_value(value: &CFType) -> Option<f64> {
 
 fn cursor_position() -> Option<CGPoint> {
     CGEvent::new(None).map(|event| CGEvent::location(Some(&event)))
-}
-
-fn post_scroll(delta: i32) -> Result<(), String> {
-    // Wheel events are routed by the actual pointer. Use wherever the user
-    // has the pointer, without moving it. The caller pauses when it leaves
-    // the selection, so the user can click the preview panel or menu.
-    let point = cursor_position().unwrap_or(CGPoint { x: 0.0, y: 0.0 });
-    post_scroll_at(point, delta)
 }
 
 fn post_scroll_at(point: CGPoint, delta: i32) -> Result<(), String> {
@@ -875,20 +1278,30 @@ impl PixelFrame {
         if self.width != other.width || self.height != other.height {
             return false;
         }
-        let sx = (self.width / 64).max(1);
-        let sy = (self.height / 64).max(1);
-        let mut difference = 0u64;
+        // Sparse 64×64 sampling misses text in mostly white pages: a small
+        // scroll can move every text line while all sample points stay white.
+        // Denser sampling makes motion detection reliable without comparing
+        // every pixel in a large Retina capture.
+        let sx = (self.width / 256).max(1);
+        let sy = (self.height / 256).max(1);
+        let mut changed = 0usize;
         let mut samples = 0u64;
         for y in (0..self.height).step_by(sy) {
             for x in (0..self.width).step_by(sx) {
                 let offset = (y * self.width + x) * 4;
-                difference += self.rgba[offset].abs_diff(other.rgba[offset]) as u64;
-                difference += self.rgba[offset + 1].abs_diff(other.rgba[offset + 1]) as u64;
-                difference += self.rgba[offset + 2].abs_diff(other.rgba[offset + 2]) as u64;
-                samples += 3;
+                let difference = self.rgba[offset].abs_diff(other.rgba[offset]) as u16
+                    + self.rgba[offset + 1].abs_diff(other.rgba[offset + 1]) as u16
+                    + self.rgba[offset + 2].abs_diff(other.rgba[offset + 2]) as u16;
+                if difference >= 36 {
+                    changed += 1;
+                }
+                samples += 1;
             }
         }
-        samples > 0 && difference as f64 / (samples as f64) < 1.5
+        // Sparse text on a white page can change far fewer than 0.1% of
+        // sampled points between frames. Keep the noise floor low enough to
+        // detect that movement while ignoring a handful of blinking pixels.
+        samples > 0 && changed < (samples as usize / 10_000).max(4)
     }
 
     fn append_below(&mut self, next: &Self, overlap: usize) -> Result<(), String> {
@@ -899,6 +1312,28 @@ impl PixelFrame {
             .extend_from_slice(&next.rgba[overlap * self.width * 4..]);
         self.height += next.height - overlap;
         Ok(())
+    }
+
+    fn crop_to_height(&self, height: usize) -> Result<Self, String> {
+        if height < 2 || height > self.height {
+            return Err("滚动截图裁剪高度无效".to_string());
+        }
+        Ok(Self {
+            width: self.width,
+            height,
+            rgba: self.rgba[..height * self.width * 4].to_vec(),
+        })
+    }
+
+    fn crop_to_height_at_most(self, height: usize) -> Result<Self, String> {
+        if height < 2 || self.height < height {
+            return Err("截图尺寸变化，无法保持滚动截图区域一致".to_string());
+        }
+        if self.height == height {
+            Ok(self)
+        } else {
+            self.crop_to_height(height)
+        }
     }
 
     /// Stitch `next` below the current image. Returns `false` when the
@@ -915,6 +1350,9 @@ impl PixelFrame {
     }
 
     fn append_with_overlap(&mut self, next: &Self, overlap: usize) -> Result<bool, String> {
+        if self.width != next.width || overlap >= next.height {
+            return Err("截图尺寸变化，无法可靠拼接".to_string());
+        }
         let added = next.height.saturating_sub(overlap);
         if added == 0 {
             return Err("页面没有继续向下滚动，请检查选区或滚动区域".to_string());
@@ -934,33 +1372,146 @@ impl PixelFrame {
         Ok(true)
     }
 
-    fn to_cg_image(&self) -> Result<CFRetained<CGImage>, String> {
-        let data = unsafe { CFData::new(None, self.rgba.as_ptr(), self.rgba.len() as isize) }
-            .ok_or_else(|| "无法建立长图像素数据".to_string())?;
-        let provider = CGDataProvider::with_cf_data(Some(&data))
-            .ok_or_else(|| "无法建立长图像数据源".to_string())?;
-        let color_space =
-            CGColorSpace::new_device_rgb().ok_or_else(|| "无法建立 RGB 色彩空间".to_string())?;
-        let bitmap_info = CGBitmapInfo::from_bits_retain(
-            CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
-        );
-        unsafe {
-            CGImage::new(
-                self.width,
-                self.height,
-                8,
-                32,
-                self.width * 4,
-                Some(&color_space),
-                bitmap_info,
-                Some(&provider),
-                ptr::null(),
-                false,
-                CGColorRenderingIntent::RenderingIntentDefault,
-            )
+    /// Stitch a newly captured frame above the current image. `overlap` is
+    /// the shared bottom part of `next` and the top part of the current image.
+    fn prepend_with_overlap(&mut self, next: &Self, overlap: usize) -> Result<bool, String> {
+        if self.width != next.width || overlap >= next.height {
+            return Err("截图尺寸变化，无法可靠拼接".to_string());
         }
-        .ok_or_else(|| "无法生成拼接后的长图".to_string())
+        let added = next.height - overlap;
+        let new_height = self
+            .height
+            .checked_add(added)
+            .ok_or_else(|| "长图高度超出限制".to_string())?;
+        let pixels = self
+            .width
+            .checked_mul(new_height)
+            .ok_or_else(|| "长图尺寸超出限制".to_string())?;
+        if new_height > MAX_IMAGE_HEIGHT || pixels > MAX_IMAGE_PIXELS {
+            return Ok(false);
+        }
+
+        let prefix_bytes = added
+            .checked_mul(self.width)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| "长图尺寸超出限制".to_string())?;
+        let total_bytes = self
+            .rgba
+            .len()
+            .checked_add(prefix_bytes)
+            .ok_or_else(|| "长图尺寸超出限制".to_string())?;
+        let mut prepended = Vec::with_capacity(total_bytes);
+        prepended.extend_from_slice(&next.rgba[..prefix_bytes]);
+        prepended.extend_from_slice(&self.rgba);
+        self.rgba = prepended;
+        self.height = new_height;
+        Ok(true)
     }
+}
+
+/// Find a large, visually structured region near the bottom that remains at
+/// the same screen coordinates while the document behind it scrolls. Fixed
+/// composers and floating controls are excluded from every stitched frame so
+/// they are not repeated once per scroll step.
+fn fixed_bottom_ui_top(previous: &PixelFrame, next: &PixelFrame) -> Option<usize> {
+    if previous.width != next.width
+        || previous.height != next.height
+        || previous.width < 64
+        || previous.height < 240
+    {
+        return None;
+    }
+    let width = previous.width;
+    let height = previous.height;
+    let x_step = (width / 400).max(1);
+    // Sample multiple overlapping horizontal bands. A composer may only span
+    // the central half of a wide selection, while moving page content remains
+    // visible on both sides of it.
+    let band_start = width / 12;
+    let band_end = width * 11 / 12;
+    let band_width = ((band_end - band_start) * 3 / 5).max(48);
+    let band_stride = ((band_end - band_start - band_width) / 4).max(1);
+    let bands: Vec<Vec<usize>> = (0..=4)
+        .map(|index| {
+            let start = band_start + index * band_stride;
+            (start..(start + band_width).min(band_end))
+                .step_by(x_step)
+                .collect::<Vec<usize>>()
+        })
+        .filter(|columns| columns.len() >= 24)
+        .collect();
+    if bands.is_empty() {
+        return None;
+    }
+
+    let search_start = height * FIXED_UI_SEARCH_START / 100;
+    let search_end = height * FIXED_UI_SEARCH_END / 100;
+    let mut stable_rows = vec![vec![false; height]; bands.len()];
+    let mut informative_rows = vec![vec![false; height]; bands.len()];
+    for y in search_start..search_end {
+        let row = y * width * 4;
+        for (band_index, sample_columns) in bands.iter().enumerate() {
+            let mut same = 0usize;
+            let mut edges = 0usize;
+            let mut previous_luma = None;
+            let mut changed = 0usize;
+            for &x in sample_columns {
+                let offset = row + x * 4;
+                let a = luminance(&previous.rgba, offset);
+                let b = luminance(&next.rgba, offset);
+                // Semi-transparent panels retain a faint trace of the page
+                // underneath. Allow small blending deltas, but compare the
+                // full row inside each horizontal band.
+                same += usize::from(a.abs_diff(b) <= 32);
+                changed += usize::from(a.abs_diff(b) > 32);
+                if previous_luma.is_some_and(|value: u32| value.abs_diff(a) >= 18) {
+                    edges += 1;
+                }
+                previous_luma = Some(a);
+            }
+            stable_rows[band_index][y] = same * 100 >= sample_columns.len() * 84;
+            informative_rows[band_index][y] =
+                edges >= (sample_columns.len() / 100).max(3) || changed == 0;
+        }
+    }
+
+    let min_run = (height * FIXED_UI_MIN_RUN / 100).max(48);
+    let min_informative = (height / 100).max(8);
+    // A page may contain an unchanged card or sticky section above a bottom
+    // composer. Keep scanning and choose the lowest stable informative run.
+    for band_index in 0..bands.len() {
+        let mut lowest_bottom_ui = None;
+        let mut y = search_start;
+        while y < search_end {
+            if !stable_rows[band_index][y] {
+                y += 1;
+                continue;
+            }
+            let start = y;
+            while y < search_end && stable_rows[band_index][y] {
+                y += 1;
+            }
+            let end = y;
+            if end - start < min_run || end * 100 < height * 82 {
+                continue;
+            }
+            let informative = informative_rows[band_index][start..end]
+                .iter()
+                .filter(|row| **row)
+                .count();
+            if informative < min_informative {
+                continue;
+            }
+            let top = start.saturating_sub((height / 80).max(12));
+            if top >= height / 2 && top < height - 64 {
+                lowest_bottom_ui = Some(top);
+            }
+        }
+        if let Some(top) = lowest_bottom_ui {
+            return Some(top);
+        }
+    }
+    None
 }
 
 fn find_overlap(previous: &PixelFrame, next: &PixelFrame) -> Result<usize, String> {
@@ -990,6 +1541,29 @@ fn find_overlap_with_hint(
     find_overlap(previous, next)
 }
 
+/// Determine frame order from the image overlap. Wheel event signs vary
+/// between apps and input sources, so the preferred direction is only a hint.
+fn find_frame_overlap(
+    previous: &PixelFrame,
+    next: &PixelFrame,
+    hint: Option<usize>,
+    prefer_upward: bool,
+) -> Result<(usize, bool), String> {
+    let preferred = if prefer_upward {
+        find_overlap_with_hint(next, previous, hint).map(|overlap| (overlap, true))
+    } else {
+        find_overlap_with_hint(previous, next, hint).map(|overlap| (overlap, false))
+    };
+    preferred.or_else(|first_error| {
+        let opposite = if prefer_upward {
+            find_overlap_with_hint(previous, next, hint).map(|overlap| (overlap, false))
+        } else {
+            find_overlap_with_hint(next, previous, hint).map(|overlap| (overlap, true))
+        };
+        opposite.map_err(|_| first_error)
+    })
+}
+
 fn find_overlap_in_range(
     previous: &PixelFrame,
     next: &PixelFrame,
@@ -1008,17 +1582,15 @@ fn find_overlap_in_range(
         ),
         None => (min_shift, max_shift),
     };
-    let step_x = (previous.width / 160).max(1);
-    let (active_columns, active_rows) = motion_mask(previous, next);
-    let sample_columns: Vec<usize> = active_columns.iter().copied().step_by(step_x).collect();
-    if sample_columns.is_empty() || active_rows.is_empty() {
+    let Some((sample_columns, active_rows)) = overlap_sample_points(previous, next) else {
         return Err("画面没有可用的滚动内容，无法拼接".to_string());
-    }
+    };
     let mut best = (usize::MAX, 0usize);
     let mut best_bad = 1.0f64;
     let mut second = usize::MAX;
     // A two-pixel stride can miss the true offset by one pixel and make two
     // neighboring shifts look equally plausible. Check every row offset.
+    let mut scores = Vec::with_capacity(max_shift - min_shift + 1);
     for shift in min_shift..=max_shift {
         let overlap = height - shift;
         let mut score = 0u64;
@@ -1050,25 +1622,24 @@ fn find_overlap_in_range(
             }
         }
         if samples == 0 {
+            scores.push((shift, usize::MAX, 1.0));
             continue;
         }
         let average = (score / samples) as usize;
+        let bad_ratio = bad as f64 / samples as f64;
+        scores.push((shift, average, bad_ratio));
         if average < best.0 {
             second = best.0;
-            best_bad = bad as f64 / samples as f64;
+            best_bad = bad_ratio;
             best = (average, shift);
         } else if shift.abs_diff(best.1) > height / 40 {
             second = second.min(average);
         }
     }
-    // A perfect (or near-perfect) match may have a second candidate one
-    // luminance step away on repetitive pages. Only reject an exact tie in
-    // that case; for noisy frames keep the small tolerance.
-    let ambiguous = if best.0 <= 1 {
-        second <= best.0
-    } else {
-        second <= best.0.saturating_add(1)
-    };
+    // A fixed animation can corrupt part of the true match. A valid offset
+    // forms a low-error basin around neighboring shifts; isolated ties caused
+    // by fixed UI and blank regions do not.
+    let ambiguous = overlap_is_ambiguous(&scores, best.1, height);
     if best.1 == 0 || best.0 > 32 || best_bad > 0.30 || ambiguous {
         log(&format!(
             "scroll shot: overlap failed best={} shift={} bad={:.2} second={} cols={} rows={}",
@@ -1086,56 +1657,96 @@ fn find_overlap_in_range(
     Ok(height - best.1)
 }
 
-/// Columns and rows that actually change between the two frames. Fixed
-/// toolbars, sidebars and blank margins are excluded so they cannot bias the
-/// match toward a zero offset or create a false tie.
-fn motion_mask(previous: &PixelFrame, next: &PixelFrame) -> (Vec<usize>, Vec<usize>) {
+fn overlap_is_ambiguous(scores: &[(usize, usize, f64)], best_shift: usize, height: usize) -> bool {
+    let Some((_, best_score, _)) = scores.iter().find(|(shift, _, _)| *shift == best_shift) else {
+        return true;
+    };
+    if *best_score == usize::MAX {
+        return true;
+    }
+    let tolerance = best_score.saturating_add((best_score / 4).max(2));
+    let distinct_distance = (height / 12).max(6);
+    let competing: Vec<usize> = scores
+        .iter()
+        .filter_map(|(shift, score, bad_ratio)| {
+            (*score <= tolerance && *bad_ratio <= 0.30).then_some(*shift)
+        })
+        .collect();
+    competing.iter().any(|shift| {
+        shift.abs_diff(best_shift) >= distinct_distance
+            && (shift.abs_diff(best_shift) > 1 || competing.len() > 1)
+    })
+}
+
+fn overlap_sample_points(
+    previous: &PixelFrame,
+    next: &PixelFrame,
+) -> Option<(Vec<usize>, Vec<usize>)> {
     let width = previous.width;
     let height = previous.height;
+    if width < 2 || height < 2 || next.width != width || next.height != height {
+        return None;
+    }
     let step_x = (width / 300).max(1);
-    let mut columns = vec![0u64; width];
-    let mut rows = vec![0u64; height];
-    for (y, row) in rows.iter_mut().enumerate() {
+    let mut column_activity = vec![0u64; width];
+    let mut row_activity = vec![0u64; height];
+    for (y, row) in row_activity.iter_mut().enumerate() {
         for x in (0..width).step_by(step_x) {
             let offset = (y * width + x) * 4;
-            let lum_a = (previous.rgba[offset] as u32 * 3
-                + previous.rgba[offset + 1] as u32 * 6
-                + previous.rgba[offset + 2] as u32)
-                / 10;
-            let lum_b = (next.rgba[offset] as u32 * 3
-                + next.rgba[offset + 1] as u32 * 6
-                + next.rgba[offset + 2] as u32)
-                / 10;
-            let difference = lum_a.abs_diff(lum_b) as u64;
-            columns[x] += difference;
+            let a = luminance(&previous.rgba, offset);
+            let b = luminance(&next.rgba, offset);
+            let difference = a.abs_diff(b) as u64;
+            column_activity[x] += difference;
             *row += difference;
         }
     }
 
-    fn select(activity: &[u64], total: usize) -> Vec<usize> {
-        let max = activity.iter().copied().max().unwrap_or(0);
-        if max < 8 {
-            return (0..total).collect();
-        }
-        let threshold = (max / 12).max(2);
-        let active: Vec<usize> = activity
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| (*value >= threshold).then_some(index))
-            .collect();
-        if active.len() < total / 8 {
-            (0..total).collect()
-        } else {
-            active
-        }
-    }
+    let mut columns = active_indices(&column_activity, width);
+    let mut rows = active_indices(&row_activity, height);
+    // Avoid overfitting the match to a blinking caret, spinner or cursor.
+    // Keep deterministic, evenly distributed samples across the content.
+    columns = evenly_spaced(columns, OVERLAP_SAMPLE_COLUMNS);
+    rows = evenly_spaced(rows, OVERLAP_SAMPLE_ROWS);
+    (!columns.is_empty() && !rows.is_empty()).then_some((columns, rows))
+}
 
-    (select(&columns, width), select(&rows, height))
+fn luminance(rgba: &[u8], offset: usize) -> u32 {
+    (rgba[offset] as u32 * 3 + rgba[offset + 1] as u32 * 6 + rgba[offset + 2] as u32) / 10
+}
+
+fn active_indices(activity: &[u64], total: usize) -> Vec<usize> {
+    let max = activity.iter().copied().max().unwrap_or(0);
+    if max < 8 {
+        return (0..total).collect();
+    }
+    let threshold = (max / 12).max(2);
+    let active: Vec<usize> = activity
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| (*value >= threshold).then_some(index))
+        .collect();
+    if active.len() < total / 8 {
+        (0..total).collect()
+    } else {
+        active
+    }
+}
+
+fn evenly_spaced(values: Vec<usize>, max_samples: usize) -> Vec<usize> {
+    if values.len() <= max_samples {
+        return values;
+    }
+    (0..max_samples)
+        .map(|index| values[index * (values.len() - 1) / (max_samples - 1).max(1)])
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PixelFrame, find_overlap};
+    use super::{
+        CaptureDisposition, PixelFrame, capture_disposition, find_frame_overlap, find_overlap,
+        fixed_bottom_ui_top,
+    };
 
     fn patterned_frame(width: usize, height: usize, first_row: usize) -> PixelFrame {
         let mut rgba = vec![0; width * height * 4];
@@ -1184,6 +1795,43 @@ mod tests {
         assert_eq!(
             stitched.rgba,
             patterned_frame(width, height + shift, 0).rgba
+        );
+    }
+
+    #[test]
+    fn prepends_frames_when_scroll_capture_moves_toward_the_top() {
+        let width = 96;
+        let height = 120;
+        let shift = 24;
+        let earlier = patterned_frame(width, height, 40);
+        let later = patterned_frame(width, height, 40 + shift);
+        let overlap = find_overlap(&earlier, &later).unwrap();
+        assert_eq!(overlap, height - shift);
+
+        let mut stitched = later;
+        assert!(stitched.prepend_with_overlap(&earlier, overlap).unwrap());
+        assert_eq!(stitched.height, height + shift);
+        assert_eq!(
+            stitched.rgba,
+            patterned_frame(width, height + shift, 40).rgba
+        );
+    }
+
+    #[test]
+    fn infers_frame_order_from_pixels_when_scroll_direction_is_reversed() {
+        let width = 96;
+        let height = 120;
+        let shift = 24;
+        let upper = patterned_frame(width, height, 200);
+        let lower = patterned_frame(width, height, 200 + shift);
+
+        assert_eq!(
+            find_frame_overlap(&lower, &upper, None, false).unwrap(),
+            (height - shift, true)
+        );
+        assert_eq!(
+            find_frame_overlap(&upper, &lower, None, true).unwrap(),
+            (height - shift, false)
         );
     }
 
@@ -1247,6 +1895,104 @@ mod tests {
         }
     }
 
+    fn page_frame_with_fixed_composer(
+        width: usize,
+        height: usize,
+        page_top: usize,
+        composer_top: usize,
+    ) -> PixelFrame {
+        let mut frame = patterned_frame(width, height, page_top);
+        let left = width / 18;
+        let right = width - left;
+        for y in composer_top..height {
+            for x in left..right {
+                let offset = (y * width + x) * 4;
+                for channel in 0..3 {
+                    frame.rgba[offset + channel] =
+                        ((frame.rgba[offset + channel] as u16 * 6 + 246 * 94) / 100) as u8;
+                }
+            }
+        }
+        // Stationary divider and several rows of text and controls.
+        for x in 12..width - 12 {
+            let offset = (composer_top * width + x) * 4;
+            frame.rgba[offset..offset + 4].copy_from_slice(&[190, 190, 190, 255]);
+        }
+        for line in 0..4 {
+            let glyph_top = composer_top + 28 + line * 34;
+            if glyph_top + 14 > height {
+                break;
+            }
+            for glyph in 0..12 {
+                let glyph_left = width / 4 + glyph * 8;
+                for gy in 0..14 {
+                    for gx in 0..5 {
+                        if (gx * 3 + gy * 5 + glyph) % 4 != 0 {
+                            let offset = ((glyph_top + gy) * width + glyph_left + gx) * 4;
+                            frame.rgba[offset..offset + 4].copy_from_slice(&[70, 70, 70, 255]);
+                        }
+                    }
+                }
+            }
+        }
+        frame
+    }
+
+    fn page_frame_with_centered_translucent_composer(
+        width: usize,
+        height: usize,
+        page_top: usize,
+        composer_top: usize,
+    ) -> PixelFrame {
+        let mut frame = patterned_frame(width, height, page_top);
+        let left = width * 25 / 100;
+        let right = width * 75 / 100;
+        for y in composer_top..height {
+            for x in left..right {
+                let offset = (y * width + x) * 4;
+                for channel in 0..3 {
+                    frame.rgba[offset + channel] =
+                        ((frame.rgba[offset + channel] as u16 * 8 + 248 * 92) / 100) as u8;
+                }
+            }
+        }
+        // Stationary top edge and a few rows of controls provide structural
+        // evidence even though most of the panel is nearly blank.
+        for x in left..right {
+            let offset = (composer_top * width + x) * 4;
+            frame.rgba[offset..offset + 4].copy_from_slice(&[184, 184, 184, 255]);
+        }
+        for line in 0..3 {
+            let glyph_top = composer_top + 36 + line * 42;
+            if glyph_top + 16 >= height {
+                continue;
+            }
+            for glyph in 0..18 {
+                let glyph_left = left + 32 + glyph * 11;
+                for gy in 0..14 {
+                    for gx in 0..6 {
+                        if (gx * 5 + gy * 3 + glyph) % 4 == 0 {
+                            continue;
+                        }
+                        let offset = ((glyph_top + gy) * width + glyph_left + gx) * 4;
+                        frame.rgba[offset..offset + 4].copy_from_slice(&[68, 68, 68, 255]);
+                    }
+                }
+            }
+        }
+        frame
+    }
+
+    fn add_stationary_band(frame: &mut PixelFrame, top: usize, bottom: usize) {
+        for y in top..bottom {
+            for x in frame.width / 10..frame.width * 9 / 10 {
+                let offset = (y * frame.width + x) * 4;
+                let shade = if y % 24 < 2 || x % 29 < 2 { 198 } else { 238 };
+                frame.rgba[offset..offset + 4].copy_from_slice(&[shade, shade, shade, 255]);
+            }
+        }
+    }
+
     #[test]
     fn finds_offset_with_sparse_text_and_fixed_sidebar() {
         let width = 700;
@@ -1257,4 +2003,518 @@ mod tests {
         assert_eq!(find_overlap(&previous, &next).unwrap(), height - shift);
     }
 
+    #[test]
+    fn finds_offset_with_fixed_toolbar_and_local_animation() {
+        let width = 520;
+        let height = 640;
+        let shift = 190;
+        let mut previous = sparse_page_frame(width, height, 0);
+        let mut next = sparse_page_frame(width, height, shift);
+        // A blinking animation stays fixed on screen and changes between
+        // captures; the page content behind it still has a known offset.
+        for (frame, color) in [
+            (&mut previous, [30, 90, 220, 255]),
+            (&mut next, [230, 60, 40, 255]),
+        ] {
+            for y in 180..208 {
+                for x in 160..196 {
+                    let offset = (y * width + x) * 4;
+                    frame.rgba[offset..offset + 4].copy_from_slice(&color);
+                }
+            }
+        }
+        assert_eq!(find_overlap(&previous, &next).unwrap(), height - shift);
+    }
+
+    #[test]
+    fn excludes_a_fixed_bottom_composer_before_stitching() {
+        let width = 320;
+        let height = 600;
+        let shift = 180;
+        let composer_top = 438;
+        let previous = page_frame_with_fixed_composer(width, height, 0, composer_top);
+        let next = page_frame_with_fixed_composer(width, height, shift, composer_top);
+
+        let content_height = fixed_bottom_ui_top(&previous, &next).unwrap();
+        assert!(content_height < composer_top);
+        assert!(
+            content_height >= composer_top - height / 30,
+            "detected content boundary {content_height}, expected near {composer_top}"
+        );
+
+        let first_content = previous.crop_to_height(content_height).unwrap();
+        let second_content = next.crop_to_height(content_height).unwrap();
+        let overlap = find_overlap(&first_content, &second_content).unwrap();
+        assert_eq!(overlap, content_height - shift);
+
+        let mut stitched = first_content;
+        assert!(
+            stitched
+                .append_with_overlap(&second_content, overlap)
+                .unwrap()
+        );
+        assert_eq!(stitched.height, content_height + shift);
+        assert_eq!(stitched.width, width);
+        let expected = patterned_frame(width, content_height + shift, 0);
+        let mismatched = stitched
+            .rgba
+            .iter()
+            .zip(&expected.rgba)
+            .filter(|(actual, expected)| actual != expected)
+            .count();
+        assert_eq!(
+            mismatched, 0,
+            "the fixed composer must be absent from every stitched screen (crop={content_height})"
+        );
+    }
+
+    #[test]
+    fn chooses_bottom_composer_over_a_stationary_page_card() {
+        let width = 320;
+        let height = 1000;
+        let shift = 200;
+        let page_card_top = 700;
+        let page_card_bottom = 850;
+        let composer_top = 870;
+        let mut previous = page_frame_with_fixed_composer(width, height, 0, composer_top);
+        let mut next = page_frame_with_fixed_composer(width, height, shift, composer_top);
+        add_stationary_band(&mut previous, page_card_top, page_card_bottom);
+        add_stationary_band(&mut next, page_card_top, page_card_bottom);
+
+        let content_height = fixed_bottom_ui_top(&previous, &next).unwrap();
+        assert!(
+            content_height >= page_card_bottom,
+            "selected crop {content_height} cut into the stable page card"
+        );
+        assert!(
+            content_height < composer_top,
+            "selected crop {content_height} includes the fixed composer"
+        );
+    }
+
+    #[test]
+    fn retry_frame_keeps_the_fixed_bottom_composer_excluded() {
+        let width = 320;
+        let height = 600;
+        let shift = 180;
+        let composer_top = 438;
+        let previous = page_frame_with_fixed_composer(width, height, 0, composer_top);
+        let retry_full_frame = page_frame_with_fixed_composer(width, height, shift, composer_top);
+        let capture_height = fixed_bottom_ui_top(&previous, &retry_full_frame).unwrap();
+        let previous_content = previous.crop_to_height_at_most(capture_height).unwrap();
+        let retry_content = retry_full_frame
+            .crop_to_height_at_most(capture_height)
+            .unwrap();
+
+        assert_eq!(retry_content.height, previous_content.height);
+        let overlap = find_overlap(&previous_content, &retry_content).unwrap();
+        assert_eq!(overlap, capture_height - shift);
+        let mut stitched = previous_content;
+        assert!(
+            stitched
+                .append_with_overlap(&retry_content, overlap)
+                .unwrap()
+        );
+        let expected = patterned_frame(width, capture_height + shift, 0);
+        let mismatched = stitched
+            .rgba
+            .iter()
+            .zip(&expected.rgba)
+            .filter(|(actual, expected)| actual != expected)
+            .count();
+        assert_eq!(
+            mismatched, 0,
+            "retry output must exclude the composer (crop={capture_height})"
+        );
+    }
+
+    #[test]
+    fn stitches_multiple_viewports_without_repeating_fixed_bottom_ui() {
+        let width = 320;
+        let height = 600;
+        let shift = 150;
+        let composer_top = 438;
+        let frames: Vec<_> = (0..5)
+            .map(|index| page_frame_with_fixed_composer(width, height, index * shift, composer_top))
+            .collect();
+
+        let capture_height = fixed_bottom_ui_top(&frames[0], &frames[1]).unwrap();
+        let mut previous = frames[0].crop_to_height(capture_height).unwrap();
+        let mut stitched = previous.clone();
+        for frame in frames.iter().skip(1) {
+            let frame = frame
+                .clone()
+                .crop_to_height_at_most(capture_height)
+                .unwrap();
+            let overlap = find_overlap(&previous, &frame).unwrap();
+            assert_eq!(overlap, capture_height - shift);
+            assert!(stitched.append_with_overlap(&frame, overlap).unwrap());
+            previous = frame;
+        }
+
+        let expected_height = capture_height + shift * (frames.len() - 1);
+        assert_eq!(stitched.height, expected_height);
+        assert_eq!(
+            stitched.rgba,
+            patterned_frame(width, expected_height, 0).rgba,
+            "fixed composer pixels must never appear in the stitched page"
+        );
+    }
+
+    #[test]
+    fn excludes_a_narrow_translucent_composer_while_page_moves_on_both_sides() {
+        let width = 960;
+        let height = 900;
+        let shift = 220;
+        let composer_top = 620;
+        let first = page_frame_with_centered_translucent_composer(width, height, 0, composer_top);
+        let second =
+            page_frame_with_centered_translucent_composer(width, height, shift, composer_top);
+
+        let content_height = fixed_bottom_ui_top(&first, &second).unwrap();
+        assert!(content_height < composer_top);
+        assert!(content_height >= composer_top - 24);
+
+        let first_content = first.crop_to_height(content_height).unwrap();
+        let second_content = second.crop_to_height(content_height).unwrap();
+        let overlap = find_overlap(&first_content, &second_content).unwrap();
+        let mut stitched = first_content;
+        assert!(
+            stitched
+                .append_with_overlap(&second_content, overlap)
+                .unwrap()
+        );
+        assert_eq!(
+            stitched.rgba,
+            patterned_frame(width, content_height + shift, 0).rgba
+        );
+    }
+
+    #[test]
+    fn does_not_remove_a_stationary_blank_margin() {
+        let width = 320;
+        let height = 600;
+        let previous = patterned_frame(width, height, 0);
+        let next = patterned_frame(width, height, 160);
+        assert_eq!(fixed_bottom_ui_top(&previous, &next), None);
+    }
+
+    #[test]
+    fn ignores_a_single_blinking_pixel_when_detecting_scroll() {
+        let previous = PixelFrame {
+            width: 800,
+            height: 900,
+            rgba: vec![255; 800 * 900 * 4],
+        };
+        let mut next = previous.clone();
+        next.rgba[0..4].copy_from_slice(&[0, 0, 0, 255]);
+        assert!(previous.is_nearly_identical(&next));
+    }
+
+    #[test]
+    fn detects_a_small_scroll_of_sparse_text_on_white_background() {
+        let width = 800;
+        let height = 900;
+        let make_frame = |offset: usize| {
+            let mut frame = PixelFrame {
+                width,
+                height,
+                rgba: vec![255; width * height * 4],
+            };
+            // Three short lines of text occupy only a small part of the
+            // otherwise white viewport, like a typical document page.
+            for line in 0..3 {
+                let top = 180 + line * 240;
+                for y in top..top + 8 {
+                    let page_y = y + offset;
+                    if page_y >= height {
+                        continue;
+                    }
+                    for glyph in 0..46 {
+                        let left = 48 + glyph * 13;
+                        for x in left..left + 7 {
+                            if (x + y + glyph) % 4 == 0 {
+                                continue;
+                            }
+                            let pixel = (page_y * width + x) * 4;
+                            frame.rgba[pixel..pixel + 4].copy_from_slice(&[32, 32, 32, 255]);
+                        }
+                    }
+                }
+            }
+            frame
+        };
+        let before = make_frame(0);
+        let after = make_frame(8);
+        assert!(!before.is_nearly_identical(&after));
+    }
+
+    #[test]
+    fn keeps_identical_white_frames_stationary() {
+        let frame = PixelFrame {
+            width: 800,
+            height: 900,
+            rgba: vec![255; 800 * 900 * 4],
+        };
+        assert!(frame.is_nearly_identical(&frame));
+    }
+
+    #[test]
+    fn detects_scrollbar_end_only_when_moving_toward_that_end() {
+        use super::scroll_reached_end;
+
+        assert!(scroll_reached_end(0.8, 1.0, 0.0, 1.0));
+        assert!(scroll_reached_end(0.2, 0.0, 0.0, 1.0));
+        assert!(!scroll_reached_end(1.0, 1.0, 0.0, 1.0));
+        assert!(!scroll_reached_end(0.0, 0.0, 0.0, 1.0));
+        assert!(!scroll_reached_end(0.8, 0.7, 0.0, 1.0));
+    }
+
+    #[test]
+    fn classifies_no_scroll_as_a_cropable_result_instead_of_failure() {
+        use super::{CaptureDisposition, PixelFrame, StitchCompletion, publish_disposition_for_crop};
+        use std::path::PathBuf;
+
+        let frame = PixelFrame {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255,
+            ],
+        };
+        assert_eq!(
+            publish_disposition_for_crop(
+                &CaptureDisposition::Complete,
+                frame.clone(),
+                2,
+                false,
+                false,
+                2.0,
+                PathBuf::new(),
+            ),
+            Ok(Some(StitchCompletion::NoScroll)),
+            "a page with no scroll progress must publish the initial viewport for cropping"
+        );
+        assert_eq!(
+            crate::scrollpreview::cropped_rgba().unwrap(),
+            (2, 2, frame.rgba)
+        );
+        crate::scrollpreview::clear_crop_image();
+    }
+
+    #[test]
+    fn interrupted_capture_preserves_valid_frames_for_the_crop_preview() {
+        use super::{PixelFrame, StitchCompletion, publish_disposition_for_crop};
+        use std::path::PathBuf;
+
+        let frame = PixelFrame {
+            width: 2,
+            height: 3,
+            rgba: vec![
+                1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255, 13, 14, 15,
+                255, 16, 17, 18, 255,
+            ],
+        };
+        let disposition = capture_disposition(&Err("画面重叠无法可靠识别".to_string()), false, 2);
+        assert_eq!(
+            disposition,
+            CaptureDisposition::PreserveForCrop("拼接已暂停，保留已采集的 2 屏供裁剪".to_string())
+        );
+        assert_eq!(
+            publish_disposition_for_crop(
+                &disposition,
+                frame.clone(),
+                2,
+                false,
+                false,
+                2.0,
+                PathBuf::new(),
+            )
+            .unwrap(),
+            Some(StitchCompletion::Partial)
+        );
+        assert_eq!(
+            crate::scrollpreview::cropped_rgba().unwrap(),
+            (2, 3, frame.rgba),
+        );
+        crate::scrollpreview::clear_crop_image();
+    }
+
+    #[test]
+    fn explicit_cancel_does_not_open_a_partial_result() {
+        use super::{PixelFrame, publish_disposition_for_crop};
+        use std::path::PathBuf;
+
+        assert_eq!(
+            capture_disposition(&Err("__cancelled__".to_string()), false, 1),
+            CaptureDisposition::Cancelled
+        );
+        let disposition = CaptureDisposition::Cancelled;
+        assert_eq!(
+            publish_disposition_for_crop(
+                &disposition,
+                PixelFrame {
+                    width: 2,
+                    height: 2,
+                    rgba: vec![255; 16],
+                },
+                2,
+                false,
+                false,
+                2.0,
+                PathBuf::new(),
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            capture_disposition(&Err("目标应用失去前台".to_string()), true, 1),
+            CaptureDisposition::Cancelled
+        );
+    }
+
+    #[test]
+    fn no_scroll_result_publishes_the_initial_frame_for_crop() {
+        use super::{PixelFrame, StitchCompletion, publish_stitched_for_crop};
+        use std::path::PathBuf;
+
+        let frame = PixelFrame {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255,
+            ],
+        };
+        assert_eq!(
+            publish_stitched_for_crop(frame.clone(), 2, false, false, 2.0, PathBuf::new())
+                .unwrap(),
+            StitchCompletion::NoScroll
+        );
+        assert_eq!(
+            crate::scrollpreview::cropped_rgba().unwrap(),
+            (2, 2, frame.rgba)
+        );
+        let status = crate::scroll_shot_crop_status(None);
+        assert!(status.contains("裁剪"));
+        assert!(!status.contains("失败"));
+        assert!(!status.contains("错误"));
+        crate::scrollpreview::clear_crop_image();
+    }
+
+    #[test]
+    fn accepts_a_short_capture_when_the_user_finishes_it() {
+        use super::{StitchCompletion, classify_stitch_completion};
+
+        assert_eq!(
+            classify_stitch_completion(900, 1_300, true, false),
+            StitchCompletion::Complete
+        );
+    }
+
+    #[test]
+    fn keeps_a_partial_stitch_as_a_cropable_result() {
+        use super::{
+            PixelFrame, StitchCompletion, classify_stitch_completion, publish_stitched_for_crop,
+        };
+        use std::path::PathBuf;
+
+        assert_eq!(
+            classify_stitch_completion(2_100, 1_300, false, true),
+            StitchCompletion::Partial
+        );
+
+        let frame = PixelFrame {
+            width: 2,
+            height: 3,
+            rgba: vec![
+                1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255, 13, 14, 15, 255,
+                16, 17, 18, 255,
+            ],
+        };
+        assert_eq!(
+            publish_stitched_for_crop(
+                frame.clone(),
+                2,
+                false,
+                true,
+                2.0,
+                PathBuf::new(),
+            )
+            .unwrap(),
+            StitchCompletion::Partial
+        );
+        assert_eq!(
+            crate::scrollpreview::cropped_rgba().unwrap(),
+            (2, 3, frame.rgba)
+        );
+        crate::scrollpreview::clear_crop_image();
+    }
+
+    #[test]
+    fn treats_a_viewport_crop_as_progress_when_a_fixed_composer_is_removed() {
+        use super::{StitchCompletion, classify_stitch_completion};
+
+        let original_viewport_height = 1_600;
+        let content_viewport_height = 1_300;
+        let stitched_height = 1_350;
+        assert!(stitched_height < original_viewport_height);
+        assert_eq!(
+            classify_stitch_completion(stitched_height, content_viewport_height, false, false),
+            StitchCompletion::Complete
+        );
+    }
+
+    #[test]
+    fn retries_the_other_direction_once_if_the_first_scroll_direction_is_stuck() {
+        use super::retry_opposite_direction;
+
+        let mut delta = -4;
+        let mut tried_reverse = false;
+        let mut stationary = 3;
+        let mut pending = vec![-4, -4, -4];
+        let mut stitch_upward = false;
+        assert!(retry_opposite_direction(
+            1,
+            &mut tried_reverse,
+            &mut delta,
+            &mut stationary,
+            &mut pending,
+            &mut stitch_upward,
+        ));
+        assert_eq!(delta, 4);
+        assert!(tried_reverse);
+        assert!(stitch_upward);
+        assert_eq!(stationary, 0);
+        assert!(pending.is_empty());
+        assert!(!retry_opposite_direction(
+            1,
+            &mut tried_reverse,
+            &mut delta,
+            &mut stationary,
+            &mut pending,
+            &mut stitch_upward,
+        ));
+        assert!(!retry_opposite_direction(
+            2,
+            &mut false,
+            &mut delta,
+            &mut stationary,
+            &mut pending,
+            &mut stitch_upward,
+        ));
+    }
+
+    #[test]
+    fn restores_mixed_scroll_directions_in_reverse_order() {
+        let mut session = super::ScrollSession::new(
+            1,
+            objc2_core_foundation::CGPoint { x: 0.0, y: 0.0 },
+            super::ScrollTarget::Visual,
+        );
+        session.record_steps(&[-2, -2, 3, 3, -1]);
+        assert_eq!(
+            session.restore_steps().collect::<Vec<_>>(),
+            vec![1, -3, -3, 2, 2]
+        );
+    }
 }

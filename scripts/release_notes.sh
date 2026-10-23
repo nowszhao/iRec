@@ -1,5 +1,5 @@
 #!/bin/sh
-# 生成 GitHub Release 的正文：CHANGELOG 里最新一节 + 下载安装说明。
+# 生成 GitHub Release 的正文：CHANGELOG 里 Cargo 版本对应的小节 + 下载安装说明。
 #
 #   ./scripts/release_notes.sh > dist/RELEASE_BODY.md     # ad-hoc 包
 #   SIGNED=1 ./scripts/release_notes.sh > ...             # 已签名公证
@@ -10,8 +10,15 @@ cd "$(dirname "$0")/.."
 
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 
-# CHANGELOG 里第一个 ## 小节，跳过标题行和开头的空行。
-awk '/^## / { seen++; next } seen == 1 { print }' CHANGELOG.md | sed -e '/./,$!d'
+# 找到 Cargo.toml 当前版本对应的小节，跳过标题行和开头的空行。
+awk -v version="$VERSION" '
+  /^## / {
+    if (printing) exit
+    printing = ($0 == "## " version || index($0, "## " version "（") == 1 || index($0, "## " version " (") == 1)
+    next
+  }
+  printing { print }
+' CHANGELOG.md | sed -e '/./,$!d'
 
 printf '\n## 下载\n\n'
 printf '| 机型 | 包 |\n| --- | --- |\n'

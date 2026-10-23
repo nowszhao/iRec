@@ -38,6 +38,12 @@ pub enum Action {
     ScrollShotProgress(String),
     /// Notify the main thread that scroll capture has finished or failed.
     ScrollShotFinished(ScrollShotResult),
+    /// Confirm the selected crop of a completed scroll capture.
+    ConfirmScrollShotCrop,
+    /// Discard a completed scroll capture from its crop preview.
+    DiscardScrollShotCrop,
+    /// Notify the main thread that saving a scroll-shot crop has completed.
+    ScrollShotCropFinished(Result<(PathBuf, u64), String>),
     /// Copy a saved screenshot image to the system pasteboard.
     CopyImageToClipboard(PathBuf),
     /// Copy a saved recording file reference to the system pasteboard.
@@ -60,9 +66,8 @@ pub enum Action {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScrollShotResult {
-    Finished(PathBuf, u64),
-    /// Image saved, but the original scroll position could not be restored.
-    FinishedWithWarning(PathBuf, u64, String),
+    /// The stitched image is ready for crop adjustment.
+    ReadyForCrop(Option<String>),
     Cancelled,
     Failed(String),
 }
@@ -387,6 +392,7 @@ pub fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> R {
 }
 
 /// Appends a line to `~/Library/Logs/irec.log` (best effort).
+#[cfg(not(test))]
 pub fn log(message: &str) {
     use std::io::Write as _;
     eprintln!("iRec: {message}");
@@ -406,6 +412,9 @@ pub fn log(message: &str) {
         let _ = writeln!(file, "{secs}	{message}");
     }
 }
+
+#[cfg(test)]
+pub fn log(_message: &str) {}
 
 pub fn push_action(action: Action) {
     with_state(|s| s.actions.push_back(action));

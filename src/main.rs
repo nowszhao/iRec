@@ -28,8 +28,8 @@ use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSBackingStoreType, NSBezierPath, NSButton, NSButtonType, NSColor,
-    NSEvent, NSFont, NSImage, NSMenu, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSPopUpButton,
-    NSPasteboard, NSPasteboardWriting, NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow,
+    NSEvent, NSFont, NSImage, NSMenu, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSPasteboard,
+    NSPasteboardWriting, NSPopUpButton, NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow,
     NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
@@ -723,7 +723,13 @@ impl AppDelegate {
         let line = menu_item(mtm, "显示晾衣绳", Some(sel!(toggleLine:)), self, 0);
         menu.addItem(&line);
         self.ivars().line_toggle_item.set(line).ok();
-        menu.addItem(&menu_item(mtm, "清空晾衣绳", Some(sel!(clearLine:)), self, 0));
+        menu.addItem(&menu_item(
+            mtm,
+            "清空晾衣绳",
+            Some(sel!(clearLine:)),
+            self,
+            0,
+        ));
         let settings = menu_item(mtm, "设置…", Some(sel!(showWindow:)), self, 0);
         settings.setKeyEquivalent(ns_string!(","));
         menu.addItem(&settings);
@@ -837,14 +843,24 @@ impl AppDelegate {
                 }
             }
             Action::CancelScrollShot => {
-                with_state(|s| s.scroll_shot_status = Some("正在取消并恢复原位置…".to_string()));
-                scrollshot::activate_target(self.mtm());
-                scrollshot::request_cancel();
+                if scrollshot::crop_is_ready() {
+                    self.handle(Action::DiscardScrollShotCrop);
+                } else {
+                    with_state(|s| {
+                        s.scroll_shot_status = Some("正在取消并恢复原位置…".to_string())
+                    });
+                    scrollshot::activate_target(self.mtm());
+                    scrollshot::request_cancel();
+                }
             }
             Action::FinishScrollShot => {
-                with_state(|s| s.scroll_shot_status = Some("正在完成长图…".to_string()));
-                scrollshot::activate_target(self.mtm());
-                scrollshot::request_finish();
+                if scrollshot::is_active() {
+                    with_state(|s| s.scroll_shot_status = Some("正在完成长图…".to_string()));
+                    scrollshot::activate_target(self.mtm());
+                    scrollshot::request_finish();
+                } else if scrollshot::crop_is_ready() {
+                    self.handle(Action::ConfirmScrollShotCrop);
+                }
             }
             Action::ScrollShotProgress(message) => {
                 with_state(|s| s.scroll_shot_status = Some(message));
@@ -854,32 +870,106 @@ impl AppDelegate {
             }
             Action::ScrollShotFinished(result) => {
                 scrollshot::finish_on_main_thread(self.mtm());
-                hotkey::unregister_scroll_cancel();
-                scrollpreview::close(self.mtm());
-                with_state(|s| s.scroll_shot_status = None);
-                let warning = match &result {
-                    ScrollShotResult::FinishedWithWarning(_, _, warning) => Some(warning.clone()),
-                    _ => None,
-                };
                 match result {
-                    ScrollShotResult::Finished(path, bytes)
-                    | ScrollShotResult::FinishedWithWarning(path, bytes, _) => {
-                        line::hang_later(path.clone(), None);
-                        push_action(Action::CopyImageToClipboard(path.clone()));
-                        with_state(|s| {
-                            s.last_saved = Some((path.clone(), bytes));
-                            s.saved_at = Some(Instant::now());
-                            s.last_error = warning.clone();
-                        });
+                    ScrollShotResult::ReadyForCrop(warning) => {
+                        if scrollpreview::show_crop(self.mtm()) {
+                            scrollshot::set_crop_ready(true);
+                            with_state(|s| {
+                                if let Some(warning) = warning.as_deref() {
+                                    log(&format!("scroll shot partial result: {warning}"));
+                                }
+                                s.scroll_shot_status =
+                                    Some(scroll_shot_crop_status(warning.as_deref()));
+                            });
+                        } else {
+                            hotkey::unregister_scroll_cancel();
+                            scrollpreview::close(self.mtm());
+                            scrollshot::set_crop_ready(false);
+                            with_state(|s| {
+                                s.scroll_shot_status = None;
+                                s.last_error = Some("无法打开长图裁剪预览，请重新截图".to_string());
+                            });
+                        }
                     }
                     ScrollShotResult::Cancelled => {
+                        hotkey::unregister_scroll_cancel();
+                        scrollpreview::close(self.mtm());
+                        scrollshot::set_crop_ready(false);
+                        with_state(|s| s.scroll_shot_status = None);
                         log("scroll shot cancelled; original position restored");
                     }
                     ScrollShotResult::Failed(err) => {
+                        hotkey::unregister_scroll_cancel();
+                        scrollpreview::close(self.mtm());
+                        scrollshot::set_crop_ready(false);
+                        with_state(|s| s.scroll_shot_status = None);
+                        log(&format!("scroll shot menu error: {err}"));
                         with_state(|s| s.last_error = Some(err));
                     }
                 }
             }
+            Action::ConfirmScrollShotCrop => {
+                if !scrollshot::crop_is_ready() {
+                    return;
+                }
+                if scrollpreview::crop_is_saving() {
+                    return;
+                }
+                match scrollpreview::cropped_rgba() {
+                    Ok((width, height, rgba)) => {
+                        scrollpreview::set_crop_saving(true);
+                        with_state(|s| {
+                            s.scroll_shot_status = Some("正在保存裁剪后的长图…".to_string())
+                        });
+                        let Some(out_dir) = scrollpreview::crop_output_dir() else {
+                            scrollpreview::set_crop_saving(false);
+                            with_state(|s| {
+                                s.scroll_shot_status =
+                                    Some("长图保存路径已失效，请重新截图".to_string())
+                            });
+                            return;
+                        };
+                        std::thread::spawn(move || {
+                            let result = scrollshot::save_crop_png(width, height, &rgba, &out_dir);
+                            push_action(Action::ScrollShotCropFinished(result));
+                        });
+                    }
+                    Err(err) => {
+                        with_state(|s| s.last_error = Some(err));
+                    }
+                }
+            }
+            Action::DiscardScrollShotCrop => {
+                if scrollshot::crop_is_ready() && !scrollpreview::crop_is_saving() {
+                    scrollshot::set_crop_ready(false);
+                    hotkey::unregister_scroll_cancel();
+                    scrollpreview::close(self.mtm());
+                    with_state(|s| s.scroll_shot_status = None);
+                }
+            }
+            Action::ScrollShotCropFinished(result) => match result {
+                Ok((path, bytes)) => {
+                    scrollshot::set_crop_ready(false);
+                    hotkey::unregister_scroll_cancel();
+                    scrollpreview::close(self.mtm());
+                    with_state(|s| {
+                        s.scroll_shot_status = None;
+                        s.last_saved = Some((path.clone(), bytes));
+                        s.saved_at = Some(Instant::now());
+                        s.last_error = None;
+                    });
+                    line::hang_later(path.clone(), None);
+                    push_action(Action::CopyImageToClipboard(path));
+                }
+                Err(err) => {
+                    scrollpreview::set_crop_saving(false);
+                    log(&format!("scroll shot save failed: {err}"));
+                    with_state(|s| {
+                        s.scroll_shot_status = None;
+                        s.last_error = Some(err);
+                    });
+                }
+            },
             Action::Markup(path) => {
                 crate::markup::edit(path, |path| {
                     line::refresh(path.clone());
@@ -1497,21 +1587,35 @@ impl AppDelegate {
         let (recording, stopping) = with_state(|s| (s.recorder.is_some(), s.stopping));
         let scroll_status = with_state(|s| s.scroll_shot_status.clone());
         let scrolling = scrollshot::is_active();
+        let crop_ready = scrollshot::crop_is_ready();
+        let crop_saving = scrollpreview::crop_is_saving();
         if let Some(item) = self.ivars().scroll_shot_item.get() {
             item.setHidden(scrolling);
             item.setEnabled(!recording && !stopping && !scrolling && scroll_status.is_none());
         }
         if let Some(item) = self.ivars().finish_scroll_shot_item.get() {
-            item.setHidden(!scrolling);
-            item.setEnabled(
+            item.setTitle(&NSString::from_str(if crop_ready {
+                "保存裁剪"
+            } else {
+                "完成滚动截图"
+            }));
+            item.setHidden(!scrolling && !crop_ready);
+            item.setEnabled(if crop_ready {
+                !crop_saving
+            } else {
                 scrolling
                     && !scrollshot::cancel_requested()
-                    && scroll_status.as_deref() != Some("正在完成长图…"),
-            );
+                    && scroll_status.as_deref() != Some("正在完成长图…")
+            });
         }
         if let Some(item) = self.ivars().cancel_scroll_shot_item.get() {
-            item.setHidden(!scrolling);
-            item.setEnabled(scrolling);
+            item.setTitle(&NSString::from_str(if crop_ready {
+                "放弃长图"
+            } else {
+                "取消滚动截图"
+            }));
+            item.setHidden(!scrolling && !crop_ready);
+            item.setEnabled(if crop_ready { !crop_saving } else { scrolling });
         }
         let (enabled, _, revealed) = line::status();
         if let Some(item) = self.ivars().line_toggle_item.get() {
@@ -1624,9 +1728,9 @@ impl AppDelegate {
                 if s.permission_blocked {
                     None
                 } else if let Some(status) = &s.scroll_shot_status {
-                    Some(status.clone())
+                    Some(menu_status_text(status))
                 } else if let Some(err) = &s.last_error {
-                    Some(format!("⚠ {err}"))
+                    Some(menu_status_text(&format!("⚠ {err}")))
                 } else {
                     None
                 }
@@ -1646,6 +1750,64 @@ impl AppDelegate {
             }
         }
     }
+}
+
+fn menu_status_text(text: &str) -> String {
+    if text.contains("画面重叠无法可靠识别") {
+        return "⚠ 长图拼接失败，请换选区重试".to_string();
+    }
+    const MAX_CHARS: usize = 42;
+    let mut chars = text.chars();
+    let short: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+fn scroll_shot_crop_status(warning: Option<&str>) -> String {
+    match warning {
+        Some(warning) => format!("{warning}；拖动边界裁剪保存"),
+        None => "拖动上下边界裁剪，保存后加入晾衣绳".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod menu_status_tests {
+    use super::{menu_status_text, scroll_shot_crop_status};
+
+    #[test]
+    fn long_stitch_error_is_shortened_for_the_menu() {
+        let text = "⚠ 画面重叠无法可靠识别，已停止拼接；请框选稳定的页面内容后重试（已重试一次；请重新框选更大的页面区域，避开固定工具栏和动画内容）";
+        let short = menu_status_text(text);
+        assert_eq!(short, "⚠ 长图拼接失败，请换选区重试");
+        assert!(short.chars().count() < 30);
+    }
+
+    #[test]
+    fn other_long_menu_messages_are_bounded() {
+        let short = menu_status_text(&"错误".repeat(100));
+        assert!(short.chars().count() <= 43);
+        assert!(short.ends_with('…'));
+    }
+
+    #[test]
+    fn partial_scroll_shot_is_presented_as_a_usable_crop_result() {
+        let status = scroll_shot_crop_status(Some("拼接暂停，已保留 2 屏"));
+        assert_eq!(status, "拼接暂停，已保留 2 屏；拖动边界裁剪保存");
+        assert!(!status.contains("失败"));
+        assert!(status.contains("裁剪保存"));
+    }
+
+    #[test]
+    fn page_without_scroll_is_presented_as_a_crop_action() {
+        let status = scroll_shot_crop_status(None);
+        assert_eq!(status, "拖动上下边界裁剪，保存后加入晾衣绳");
+        assert!(!status.contains("失败"));
+        assert!(!status.contains("错误"));
+    }
+
 }
 
 /// 正在等用户按组合键的槽位（CaptureView 靠它知道要改哪一个）。
@@ -1846,7 +2008,13 @@ fn build_main_menu(mtm: MainThreadMarker, target: &AppDelegate) -> Retained<NSMe
     settings.setKeyEquivalent(ns_string!(","));
     app_menu.addItem(&settings);
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
-    app_menu.addItem(&menu_item(mtm, "清空晾衣绳", Some(sel!(clearLine:)), target, 0));
+    app_menu.addItem(&menu_item(
+        mtm,
+        "清空晾衣绳",
+        Some(sel!(clearLine:)),
+        target,
+        0,
+    ));
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     let quit = menu_item(mtm, "退出 iRec", Some(sel!(quit:)), target, 0);
     quit.setKeyEquivalent(ns_string!("q"));
@@ -1869,6 +2037,7 @@ fn build_main_menu(mtm: MainThreadMarker, target: &AppDelegate) -> Retained<NSMe
     for (label, action) in [
         ("截取区域…", sel!(shotRegion:)),
         ("截取全屏", sel!(shotFull:)),
+        ("滚动截图…", sel!(scrollShot:)),
         ("录制全屏 / 停止", sel!(startFull:)),
         ("显示晾衣绳", sel!(toggleLine:)),
     ] {
@@ -1906,10 +2075,8 @@ fn copy_capture_to_clipboard(path: &Path, image: bool) {
             board.writeObjects(&NSArray::from_slice(&[writer]))
         })
     } else {
-        let url = NSURL::fileURLWithPath_isDirectory(
-            &NSString::from_str(&path.to_string_lossy()),
-            false,
-        );
+        let url =
+            NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&path.to_string_lossy()), false);
         let writer: &ProtocolObject<dyn NSPasteboardWriting> = ProtocolObject::from_ref(&*url);
         board.writeObjects(&NSArray::from_slice(&[writer]))
     };
